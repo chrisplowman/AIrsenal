@@ -1,0 +1,27 @@
+# Core AIrsenal dependencies (from pyproject.toml)
+click>=8.1.7
+pandas>=2.2.1
+requests>=2.31.0
+sqlalchemy>=2.0.27
+tqdm>=4.66.2
+dateparser>=1.2.0
+prettytable>=3.10.0
+beautifulsoup4>=4.12.3
+platformdirs>=4.2.0
+python-dateutil>=2.8.2
+lxml>=5.1.0
+html5lib>=1.1
+jax>=0.4.24
+jaxlib>=0.4.24
+
+# BPL dependency - this might cause issues, may need to comment out
+# bpl @ git+https://github.com/anguswilliams91/bpl-next
+
+# Optional but recommended dependencies
+Flask>=3.0.2
+matplotlib>=3.8.3
+seaborn>=0.13.2
+numpyro>=0.13.2
+
+# Render/deployment specific
+gunicorn>=20.1.0
