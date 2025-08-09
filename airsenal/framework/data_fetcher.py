@@ -21,6 +21,20 @@ from airsenal.framework.env import (
 
 API_HOME = "https://fantasy.premierleague.com/api"
 
+# FPL API headers to avoid 403 errors
+FPL_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    'Origin': 'https://fantasy.premierleague.com',
+    'Referer': 'https://fantasy.premierleague.com/',
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Connection': 'keep-alive',
+    'Sec-Fetch-Site': 'same-origin',
+    'Sec-Fetch-Mode': 'cors',
+    'Sec-Fetch-Dest': 'empty'
+}
+
 
 class FPLDataFetcher:
     """
@@ -305,7 +319,10 @@ class FPLDataFetcher:
         }
         self.rsession.post(url, data=headers)
 
-        r = self.rsession.get(self.FPL_LEAGUE_URL, headers=headers)
+        # Use proper headers for league API request
+        league_headers = FPL_HEADERS.copy()
+        league_headers.update(headers)
+        r = self.rsession.get(self.FPL_LEAGUE_URL, headers=league_headers)
         if r.status_code != 200:
             print("Unable to access FPL league API")
             return None
@@ -423,6 +440,8 @@ class FPLDataFetcher:
             "X-Requested-With": "XMLHttpRequest",
             "Referer": "https://fantasy.premierleague.com/a/team/my",
         }
+        # Add FPL headers to existing headers
+        headers.update(FPL_HEADERS)
         team_url = self.FPL_MYTEAM_URL.format(self.FPL_TEAM_ID)
 
         resp = self.rsession.post(team_url, data=payload, headers=headers)
@@ -452,6 +471,8 @@ class FPLDataFetcher:
             "X-Requested-With": "XMLHttpRequest",
             "Referer": "https://fantasy.premierleague.com/a/squad/transfers",
         }
+        # Add FPL headers to existing headers
+        headers.update(FPL_HEADERS)
 
         transfer_url = "https://fantasy.premierleague.com/api/transfers/"
 
@@ -484,9 +505,17 @@ class FPLDataFetcher:
     def _get_request(self, url, err_msg="Unable to access FPL API", attempts=3):
         tries = 0
         r = None
+        
+        # Use FPL headers for all fantasy.premierleague.com requests
+        headers = FPL_HEADERS if 'fantasy.premierleague.com' in url else None
+        
         while tries < attempts:
             try:
-                r = self.rsession.get(url)
+                # Add small delay to avoid rate limiting
+                if tries > 0:
+                    time.sleep(1)
+                
+                r = self.rsession.get(url, headers=headers, timeout=10)
                 break
             except requests.exceptions.ConnectionError as e:
                 tries += 1
@@ -495,7 +524,15 @@ class FPLDataFetcher:
                         f"{err_msg}: Failed to connect to FPL API when requesting {url}"
                     )
                     raise requests.exceptions.ConnectionError(msg) from e
-                time.sleep(1)
+                time.sleep(2)  # Longer delay on connection error
+            except requests.exceptions.Timeout as e:
+                tries += 1
+                if tries == attempts:
+                    msg = (
+                        f"{err_msg}: Timeout when requesting {url}"
+                    )
+                    raise requests.exceptions.Timeout(msg) from e
+                time.sleep(2)
 
         if r is None:
             msg = f"{err_msg}: Failed to connect to FPL API when requesting {url}"
