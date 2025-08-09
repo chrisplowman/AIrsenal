@@ -55,6 +55,7 @@ HTML_TEMPLATE = """
 <html>
 <head>
     <title>AIrsenal Dashboard</title>
+    <meta name="robots" content="noindex">
     <style>
         body { font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }
         .container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
@@ -75,7 +76,7 @@ HTML_TEMPLATE = """
 </head>
 <body>
     <div class="container">
-        <h1>🏈 AIrsenal Dashboard</h1>
+        <h1>AIrsenal Dashboard</h1>
         
         <div class="info">
             <strong>FPL Team ID:</strong> {{ fpl_team_id or 'Not configured' }}<br>
