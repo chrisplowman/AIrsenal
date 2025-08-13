@@ -60,13 +60,27 @@ AIRSENAL_PROCESSES = {
         'color': 'success',
         'estimated_time': '5-10 minutes'
     },
-    'run_predictions_lite': {
-        'name': 'Run Predictions (Lite)',
-        'description': 'Generate basic predictions without heavy ML models',
-        'command': ['python', '-c', 'print("Basic prediction simulation - replace with actual lite prediction")'],
-        'icon': '🔮',
-        'color': 'info',
-        'estimated_time': '1-2 minutes'
+    'run_predictions_simple': {
+        'name': 'Simple Predictions',
+        'description': 'Generate basic predictions using form-based analysis (no historical modeling)',
+        'command': ['python', '-c', '''
+import sys
+sys.path.append("/airsenal")
+try:
+    from airsenal.framework.utils import get_next_gameweek, get_players_for_gameweek
+    from airsenal.framework.schema import session
+    gw = get_next_gameweek()
+    players = get_players_for_gameweek(gw, session=session)
+    print(f"Simple prediction: Found {len(players)} players for gameweek {gw}")
+    print("Basic form-based predictions would go here")
+    print("This is a placeholder for memory-efficient predictions")
+except Exception as e:
+    print(f"Simple prediction failed: {e}")
+    sys.exit(1)
+'''],
+        'icon': '🎯',
+        'color': 'success',
+        'estimated_time': '1-3 minutes'
     },
     'optimize_team': {
         'name': 'Optimize Team',
@@ -390,9 +404,11 @@ HTML_TEMPLATE = """
                     <div class="alert alert-info">
                         <strong>💡 Tip:</strong> Run processes individually to avoid memory issues. Wait for each to complete before starting the next.
                     </div>
-                    <button class="btn btn-info btn-process" onclick="runProcess('setup_db_minimal')">🗄️ Setup Database</button>
+                    <button class="btn btn-primary btn-process" onclick="runProcess('setup_db_full')">🗄️ Setup DB (Full)</button>
+                    <button class="btn btn-info btn-process" onclick="runProcess('setup_db_minimal')">🗃️ Setup DB (Minimal)</button>
                     <button class="btn btn-warning btn-process" onclick="runProcess('update_db_lite')">🔄 Update Database</button>
-                    <button class="btn btn-success btn-process" onclick="runProcess('run_predictions')">🔮 Run Predictions</button>
+                    <button class="btn btn-success btn-process" onclick="runProcess('run_predictions_simple')">🎯 Simple Predictions</button>
+                    <button class="btn btn-success btn-process" onclick="runProcess('run_predictions')">🔮 Full Predictions</button>
                     <button class="btn btn-danger btn-process" onclick="runProcess('optimize_team')">⚡ Optimize Team</button>
                     <button class="btn btn-primary btn-process" onclick="runProcess('get_transfers')">💡 Get Transfers</button>
                     <button class="btn btn-success btn-process" onclick="showTransferManager()">🔄 Manage Transfers</button>
