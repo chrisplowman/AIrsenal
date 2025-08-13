@@ -23,5 +23,6 @@ matplotlib>=3.8.3
 seaborn>=0.13.2
 numpyro>=0.13.2
 
-# Render/deployment specific
+# Web app and system monitoring
+psutil>=5.8.0
 gunicorn>=20.1.0
