@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Modular AIrsenal web interface with individual process controls
+Simplified AIrsenal web interface (no psutil dependency)
 """
 
 import os
@@ -10,7 +10,6 @@ import time
 import json
 import queue
 import gc
-import psutil
 from datetime import datetime
 from flask import Flask, render_template_string, jsonify, request
 
@@ -21,33 +20,24 @@ processes = {}
 output_logs = {}
 current_transfers = []
 team_status = {}
-memory_stats = {'current': 0, 'peak': 0, 'limit': 512}
 
 # AIrsenal process definitions
 AIRSENAL_PROCESSES = {
-    'full_pipeline': {
-        'name': 'Full Pipeline',
-        'description': 'Run the complete AIrsenal pipeline (database setup, predictions, transfers)',
-        'command': ['airsenal_run_pipeline'],
-        'icon': '🚀',
-        'color': 'primary',
-        'estimated_time': '10-30 minutes'
-    },
     'setup_db_minimal': {
         'name': 'Setup Database (Minimal)',
         'description': 'Initialize database with current season data only (memory efficient)',
-        'command': ['airsenal_setup_initial_db', '--current-season-only'],
+        'command': ['airsenal_setup_initial_db'],
         'icon': '🗄️',
         'color': 'info',
         'estimated_time': '3-8 minutes'
     },
-    'update_db': {
-        'name': 'Update Database',
-        'description': 'Update database with latest FPL data and results',
-        'command': ['airsenal_update_db'],
+    'update_db_lite': {
+        'name': 'Update Database (Lite)',
+        'description': 'Quick database update with essential data only',
+        'command': ['airsenal_update_db', '--noattr'],
         'icon': '🔄',
         'color': 'warning',
-        'estimated_time': '2-5 minutes'
+        'estimated_time': '1-3 minutes'
     },
     'run_predictions': {
         'name': 'Run Predictions',
@@ -101,6 +91,10 @@ def parse_process_output(process_id, line):
             processes[process_id]['progress'] = min(progress, 100)
             processes[process_id]['current_step'] = line.strip()
             break
+
+def cleanup_memory():
+    """Force garbage collection to free memory"""
+    gc.collect()
 
 def get_current_team_status():
     """Get current team information and transfer suggestions"""
@@ -207,6 +201,9 @@ def run_airsenal_process(process_id):
         timestamp = datetime.now().strftime('%H:%M:%S')
         output_logs[process_id].append(f"[{timestamp}] 🚀 Starting {process_info['name']}...")
         
+        # Clean up memory before starting
+        cleanup_memory()
+        
         # Start the subprocess
         process = subprocess.Popen(
             process_info['command'],
@@ -228,13 +225,16 @@ def run_airsenal_process(process_id):
                 output_logs[process_id].append(f"[{timestamp}] {line}")
                 parse_process_output(process_id, line)
                 
-                # Keep only last 100 log entries per process
-                if len(output_logs[process_id]) > 100:
-                    output_logs[process_id] = output_logs[process_id][-100:]
+                # Keep only last 50 log entries per process to save memory
+                if len(output_logs[process_id]) > 50:
+                    output_logs[process_id] = output_logs[process_id][-50:]
         
         # Check result
         return_code = process.poll()
         processes[process_id]['end_time'] = datetime.now()
+        
+        # Clean up memory after completion
+        cleanup_memory()
         
         if return_code == 0:
             processes[process_id]['status'] = 'Completed successfully'
@@ -253,8 +253,12 @@ def run_airsenal_process(process_id):
         processes[process_id]['current_step'] = 'Error occurred'
         processes[process_id]['end_time'] = datetime.now()
         output_logs[process_id].append(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Error: {str(e)}")
+    
+    finally:
+        # Final memory cleanup
+        cleanup_memory()
 
-# Enhanced HTML template with individual process controls
+# Simple HTML template
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -298,54 +302,23 @@ HTML_TEMPLATE = """
                     <span class="text-muted" id="active-count">{{ active_processes }}</span>
                 </div>
                 <div class="info-card">
-                    <strong>Auto-Refresh:</strong><br>
-                    <div class="form-check">
-                        <input class="form-check-input" type="checkbox" id="auto-refresh" checked onchange="toggleAutoRefresh()">
-                        <label class="form-check-label" for="auto-refresh">Enabled (3s)</label>
-                    </div>
+                    <strong>Memory Optimized:</strong><br>
+                    <span class="text-success">✅ Lightweight mode</span>
                 </div>
             </div>
             
             <div class="row mb-4">
                 <div class="col-12">
-                    <h3>🎮 Quick Actions</h3>
-                    <button class="btn btn-success btn-process" onclick="runProcess('full_pipeline')">🚀 Run Full Pipeline</button>
-                    <button class="btn btn-info btn-process" onclick="runProcess('setup_db')">🗄️ Setup Database</button>
-                    <button class="btn btn-warning btn-process" onclick="runProcess('update_db')">🔄 Update Database</button>
-                    <button class="btn btn-primary btn-process" onclick="runProcess('get_transfers')">💡 Get Transfers</button>
-                    <button class="btn btn-secondary btn-process" onclick="stopAllProcesses()">⏹️ Stop All</button>
-                    <button class="btn btn-outline-secondary btn-process" onclick="clearAllLogs()">🗑️ Clear Logs</button>
-                </div>
-            </div>
-            
-            <!-- Transfer Management Section -->
-            <div class="row mb-4" id="transfer-section" style="display: none;">
-                <div class="col-12">
-                    <div class="card border-primary">
-                        <div class="card-header bg-primary text-white">
-                            <h4 class="mb-0">🔄 Transfer Management</h4>
-                        </div>
-                        <div class="card-body">
-                            <div class="row">
-                                <div class="col-md-4">
-                                    <h6>💰 Team Status</h6>
-                                    <div id="team-status">Loading...</div>
-                                </div>
-                                <div class="col-md-8">
-                                    <h6>💡 Suggested Transfers</h6>
-                                    <div id="transfer-suggestions">No suggestions available</div>
-                                    <div class="mt-3">
-                                        <button class="btn btn-success" onclick="executeTransfers()" id="execute-btn" disabled>
-                                            ⚡ Execute Selected Transfers
-                                        </button>
-                                        <button class="btn btn-outline-primary" onclick="refreshTransfers()">
-                                            🔄 Refresh
-                                        </button>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
+                    <h3>🎮 Memory-Optimized Actions</h3>
+                    <div class="alert alert-info">
+                        <strong>💡 Tip:</strong> Run processes individually to avoid memory issues. Wait for each to complete before starting the next.
                     </div>
+                    <button class="btn btn-info btn-process" onclick="runProcess('setup_db_minimal')">🗄️ Setup Database</button>
+                    <button class="btn btn-warning btn-process" onclick="runProcess('update_db_lite')">🔄 Update Database</button>
+                    <button class="btn btn-success btn-process" onclick="runProcess('run_predictions')">🔮 Run Predictions</button>
+                    <button class="btn btn-danger btn-process" onclick="runProcess('optimize_team')">⚡ Optimize Team</button>
+                    <button class="btn btn-primary btn-process" onclick="runProcess('get_transfers')">💡 Get Transfers</button>
+                    <button class="btn btn-outline-secondary btn-process" onclick="clearAllLogs()">🗑️ Clear Logs</button>
                 </div>
             </div>
             
@@ -375,7 +348,6 @@ HTML_TEMPLATE = """
         let autoRefresh = true;
         let refreshInterval;
         let selectedLogProcess = '';
-        let selectedTransfers = [];
         
         const processes = {{ processes | tojsonfilter }};
         
@@ -449,114 +421,6 @@ HTML_TEMPLATE = """
                     if (selectedLogProcess && data.logs[selectedLogProcess]) {
                         updateSelectedLog(data.logs[selectedLogProcess]);
                     }
-                    
-                    // Show transfer section if transfers are available
-                    if (data.transfers && data.transfers.length > 0) {
-                        document.getElementById('transfer-section').style.display = 'block';
-                        updateTransferDisplay(data.transfers, data.team_status);
-                    }
-                })
-                .catch(error => console.error('Error:', error));
-        }
-        
-        function updateTransferDisplay(transfers, teamStatus) {
-            // Update team status
-            const teamStatusDiv = document.getElementById('team-status');
-            if (teamStatus.error) {
-                teamStatusDiv.innerHTML = `<div class="text-danger">${teamStatus.error}</div>`;
-            } else {
-                teamStatusDiv.innerHTML = `
-                    <div><strong>Bank:</strong> £${teamStatus.bank}M</div>
-                    <div><strong>Free Transfers:</strong> ${teamStatus.free_transfers}</div>
-                    <div><strong>Team Value:</strong> £${teamStatus.team_value}M</div>
-                    <div class="text-muted small">Updated: ${new Date(teamStatus.last_updated).toLocaleTimeString()}</div>
-                `;
-            }
-            
-            // Update transfer suggestions
-            const transferDiv = document.getElementById('transfer-suggestions');
-            if (transfers.length === 0) {
-                transferDiv.innerHTML = '<div class="text-muted">No transfer suggestions available. Run "Get Transfer Suggestions" first.</div>';
-                return;
-            }
-            
-            let transferHtml = '<div class="transfer-list">';
-            transfers.slice(0, 5).forEach((transfer, index) => {
-                const isSelected = selectedTransfers.includes(index);
-                transferHtml += `
-                    <div class="form-check border rounded p-2 mb-2 ${isSelected ? 'bg-light' : ''}">
-                        <input class="form-check-input" type="checkbox" value="${index}" id="transfer${index}" 
-                               ${isSelected ? 'checked' : ''} onchange="toggleTransfer(${index})">
-                        <label class="form-check-label" for="transfer${index}">
-                            <strong>GW${transfer.gameweek}:</strong> 
-                            Player ${transfer.player_out_id} → Player ${transfer.player_in_id}<br>
-                            <small class="text-success">Expected gain: ${transfer.points_gain} pts</small>
-                            ${transfer.price_change ? `<small class="text-muted"> | Cost: £${transfer.price_change}M</small>` : ''}
-                        </label>
-                    </div>
-                `;
-            });
-            transferHtml += '</div>';
-            transferDiv.innerHTML = transferHtml;
-            
-            // Update execute button
-            document.getElementById('execute-btn').disabled = selectedTransfers.length === 0;
-        }
-        
-        function toggleTransfer(index) {
-            const checkbox = document.getElementById(`transfer${index}`);
-            if (checkbox.checked) {
-                if (!selectedTransfers.includes(index)) {
-                    selectedTransfers.push(index);
-                }
-            } else {
-                selectedTransfers = selectedTransfers.filter(i => i !== index);
-            }
-            document.getElementById('execute-btn').disabled = selectedTransfers.length === 0;
-        }
-        
-        function executeTransfers() {
-            if (selectedTransfers.length === 0) {
-                alert('Please select at least one transfer to execute.');
-                return;
-            }
-            
-            const confirmed = confirm(
-                `Are you sure you want to execute ${selectedTransfers.length} transfer(s)? ` +
-                `This will make real changes to your FPL team and cannot be undone!`
-            );
-            
-            if (!confirmed) return;
-            
-            fetch('/execute-transfers', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    transfer_indices: selectedTransfers,
-                    confirm: true
-                })
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.status === 'success') {
-                    alert(`✅ ${data.message}`);
-                    selectedTransfers = [];
-                    refreshTransfers();
-                } else {
-                    alert(`❌ ${data.message}`);
-                }
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                alert('❌ Transfer execution failed');
-            });
-        }
-        
-        function refreshTransfers() {
-            fetch('/refresh-transfers', {method: 'POST'})
-                .then(response => response.json())
-                .then(data => {
-                    updateProcessGrid();
                 })
                 .catch(error => console.error('Error:', error));
         }
@@ -607,18 +471,6 @@ HTML_TEMPLATE = """
             logContainer.scrollTop = logContainer.scrollHeight;
         }
         
-        function stopAllProcesses() {
-            if (confirm('Are you sure you want to stop all running processes?')) {
-                fetch('/stop-all', {method: 'POST'})
-                    .then(response => response.json())
-                    .then(data => {
-                        alert(data.message);
-                        updateProcessGrid();
-                    })
-                    .catch(error => console.error('Error:', error));
-            }
-        }
-        
         function clearAllLogs() {
             if (confirm('Are you sure you want to clear all logs?')) {
                 fetch('/clear-logs', {method: 'POST'})
@@ -631,23 +483,10 @@ HTML_TEMPLATE = """
             }
         }
         
-        function toggleAutoRefresh() {
-            autoRefresh = !autoRefresh;
-            const checkbox = document.getElementById('auto-refresh');
-            
-            if (autoRefresh) {
-                refreshInterval = setInterval(updateProcessGrid, 3000);
-                checkbox.checked = true;
-            } else {
-                clearInterval(refreshInterval);
-                checkbox.checked = false;
-            }
-        }
-        
         // Start auto-refresh when page loads
         window.onload = function() {
             updateProcessGrid();
-            refreshInterval = setInterval(updateProcessGrid, 3000);
+            refreshInterval = setInterval(updateProcessGrid, 5000);
         }
     </script>
 </body>
@@ -688,36 +527,8 @@ def get_all_status():
     """API endpoint to get status of all processes"""
     return jsonify({
         "processes": processes,
-        "logs": {pid: logs[-20:] for pid, logs in output_logs.items()},
-        "transfers": current_transfers,
-        "team_status": team_status
+        "logs": {pid: logs[-20:] for pid, logs in output_logs.items()}
     })
-
-@app.route('/execute-transfers', methods=['POST'])
-def execute_transfers_endpoint():
-    """API endpoint to execute selected transfers"""
-    data = request.get_json()
-    transfer_indices = data.get('transfer_indices', [])
-    confirm = data.get('confirm', False)
-    
-    if not transfer_indices:
-        return jsonify({"status": "error", "message": "No transfers selected"})
-    
-    # Get selected transfers
-    selected_transfers = [current_transfers[i] for i in transfer_indices if i < len(current_transfers)]
-    
-    if not selected_transfers:
-        return jsonify({"status": "error", "message": "Invalid transfer selection"})
-    
-    # Execute transfers
-    result = execute_transfers(selected_transfers, confirm=confirm)
-    return jsonify(result)
-
-@app.route('/refresh-transfers', methods=['POST'])
-def refresh_transfers():
-    """API endpoint to refresh team status and transfer suggestions"""
-    get_current_team_status()
-    return jsonify({"status": "success", "message": "Transfer data refreshed"})
 
 @app.route('/logs/<process_id>')
 def get_process_logs(process_id):
@@ -725,16 +536,6 @@ def get_process_logs(process_id):
     if process_id in output_logs:
         return jsonify({"logs": output_logs[process_id][-50:]})
     return jsonify({"logs": []})
-
-@app.route('/stop-all', methods=['POST'])
-def stop_all_processes():
-    """API endpoint to stop all processes (placeholder)"""
-    # Note: This is a placeholder - actual process termination would require storing process handles
-    for process_id in processes:
-        if processes[process_id]['status'] == 'Running...':
-            processes[process_id]['status'] = 'Stopped'
-            processes[process_id]['progress'] = 0
-    return jsonify({"status": "success", "message": "All processes stopped"})
 
 @app.route('/clear-logs', methods=['POST'])
 def clear_all_logs():
@@ -749,9 +550,6 @@ def health_check():
     return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()})
 
 if __name__ == '__main__':
-    # Initialize transfer data
-    get_current_team_status()
-    
     # Get port from environment variable
     port = int(os.environ.get('PORT', 10000))
     
