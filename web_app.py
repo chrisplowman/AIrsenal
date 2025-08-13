@@ -298,6 +298,54 @@ HTML_TEMPLATE = """
                     <strong>FPL Team ID:</strong><br>
                     <span class="text-muted">{{ fpl_team_id or 'Not configured' }}</span>
                 </div>
+            
+            <!-- Transfer Management Section -->
+            <div class="row mb-4" id="transfer-section" style="display: none;">
+                <div class="col-12">
+                    <div class="card border-primary">
+                        <div class="card-header bg-primary text-white">
+                            <h4 class="mb-0">🔄 Transfer Management</h4>
+                            <button type="button" class="btn-close btn-close-white float-end" onclick="hideTransferManager()"></button>
+                        </div>
+                        <div class="card-body">
+                            <div class="row">
+                                <div class="col-md-4">
+                                    <h6>💰 Team Status</h6>
+                                    <div id="team-status">
+                                        <div class="text-muted">Click "Refresh Team Data" to load current status</div>
+                                    </div>
+                                    <button class="btn btn-outline-primary btn-sm mt-2" onclick="refreshTeamData()">
+                                        🔄 Refresh Team Data
+                                    </button>
+                                </div>
+                                <div class="col-md-8">
+                                    <h6>💡 Available Transfers</h6>
+                                    <div class="alert alert-info">
+                                        <strong>How to make transfers:</strong>
+                                        <ol class="mb-0 mt-2">
+                                            <li>Run "Get Transfer Suggestions" first</li>
+                                            <li>Refresh team data to see current status</li>
+                                            <li>Select transfers you want to execute</li>
+                                            <li>Click "Execute Selected Transfers"</li>
+                                        </ol>
+                                    </div>
+                                    <div id="transfer-suggestions">
+                                        <div class="text-muted">No transfer suggestions available. Run "Get Transfer Suggestions" first.</div>
+                                    </div>
+                                    <div class="mt-3">
+                                        <button class="btn btn-success" onclick="executeTransfers()" id="execute-btn" disabled>
+                                            ⚡ Execute Selected Transfers
+                                        </button>
+                                        <button class="btn btn-outline-warning" onclick="runProcess('get_transfers')">
+                                            💡 Generate New Suggestions
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
                 <div class="info-card">
                     <strong>Server Time:</strong><br>
                     <span class="text-muted">{{ current_time }}</span>
@@ -323,6 +371,7 @@ HTML_TEMPLATE = """
                     <button class="btn btn-success btn-process" onclick="runProcess('run_predictions')">🔮 Run Predictions</button>
                     <button class="btn btn-danger btn-process" onclick="runProcess('optimize_team')">⚡ Optimize Team</button>
                     <button class="btn btn-primary btn-process" onclick="runProcess('get_transfers')">💡 Get Transfers</button>
+                    <button class="btn btn-success btn-process" onclick="showTransferManager()">🔄 Manage Transfers</button>
                     <button class="btn btn-outline-secondary btn-process" onclick="clearAllLogs()">🗑️ Clear Logs</button>
                 </div>
             </div>
@@ -353,6 +402,8 @@ HTML_TEMPLATE = """
         let autoRefresh = true;
         let refreshInterval;
         let selectedLogProcess = '';
+        let selectedTransfers = [];
+        let availableTransfers = [];
         
         // Process data passed from Python
         const processes = {
@@ -458,8 +509,172 @@ HTML_TEMPLATE = """
                     if (selectedLogProcess && data.logs[selectedLogProcess]) {
                         updateSelectedLog(data.logs[selectedLogProcess]);
                     }
+                    
+                    // Update transfer data if available
+                    if (data.transfers) {
+                        availableTransfers = data.transfers;
+                    }
                 })
                 .catch(error => console.error('Error:', error));
+        }
+        
+        function showTransferManager() {
+            document.getElementById('transfer-section').style.display = 'block';
+            refreshTeamData();
+        }
+        
+        function hideTransferManager() {
+            document.getElementById('transfer-section').style.display = 'none';
+        }
+        
+        function refreshTeamData() {
+            fetch('/team-status')
+                .then(response => response.json())
+                .then(data => {
+                    updateTeamStatus(data.team_status);
+                    if (data.transfers) {
+                        availableTransfers = data.transfers;
+                        updateTransferSuggestions(data.transfers);
+                    }
+                })
+                .catch(error => {
+                    document.getElementById('team-status').innerHTML = 
+                        '<div class="text-danger">Error loading team data. Make sure FPL credentials are set.</div>';
+                });
+        }
+        
+        function updateTeamStatus(teamStatus) {
+            const teamStatusDiv = document.getElementById('team-status');
+            if (teamStatus.error) {
+                teamStatusDiv.innerHTML = `<div class="text-danger">${teamStatus.error}</div>`;
+            } else {
+                teamStatusDiv.innerHTML = `
+                    <div class="mb-2">
+                        <strong>💰 Bank:</strong> £${teamStatus.bank || 'N/A'}M<br>
+                        <strong>🔄 Free Transfers:</strong> ${teamStatus.free_transfers || 'N/A'}<br>
+                        <strong>💎 Team Value:</strong> £${teamStatus.team_value || 'N/A'}M
+                    </div>
+                    <div class="text-muted small">Last updated: ${new Date().toLocaleTimeString()}</div>
+                `;
+            }
+        }
+        
+        function updateTransferSuggestions(transfers) {
+            const transferDiv = document.getElementById('transfer-suggestions');
+            
+            if (!transfers || transfers.length === 0) {
+                transferDiv.innerHTML = '<div class="text-muted">No transfer suggestions found. Run "Get Transfer Suggestions" to generate recommendations.</div>';
+                return;
+            }
+            
+            let transferHtml = '<div class="mb-3"><strong>Select transfers to execute:</strong></div>';
+            transferHtml += '<div class="transfer-list">';
+            
+            transfers.slice(0, 8).forEach((transfer, index) => {
+                const isSelected = selectedTransfers.includes(index);
+                transferHtml += `
+                    <div class="form-check border rounded p-3 mb-2 ${isSelected ? 'bg-light border-primary' : ''}">
+                        <input class="form-check-input" type="checkbox" value="${index}" id="transfer${index}" 
+                               ${isSelected ? 'checked' : ''} onchange="toggleTransfer(${index})">
+                        <label class="form-check-label" for="transfer${index}">
+                            <div class="d-flex justify-content-between align-items-start">
+                                <div>
+                                    <strong>Gameweek ${transfer.gameweek}:</strong><br>
+                                    <span class="text-primary">OUT:</span> Player ID ${transfer.player_out_id}<br>
+                                    <span class="text-success">IN:</span> Player ID ${transfer.player_in_id}
+                                </div>
+                                <div class="text-end">
+                                    <div class="badge bg-success">+${transfer.points_gain} pts</div>
+                                    ${transfer.price_change ? `<div class="badge bg-warning">£${transfer.price_change}M</div>` : ''}
+                                </div>
+                            </div>
+                        </label>
+                    </div>
+                `;
+            });
+            transferHtml += '</div>';
+            
+            if (transfers.length > 8) {
+                transferHtml += `<div class="text-muted small">Showing top 8 of ${transfers.length} suggestions</div>`;
+            }
+            
+            transferDiv.innerHTML = transferHtml;
+            
+            // Update execute button
+            document.getElementById('execute-btn').disabled = selectedTransfers.length === 0;
+        }
+        
+        function toggleTransfer(index) {
+            const checkbox = document.getElementById(`transfer${index}`);
+            if (checkbox.checked) {
+                if (!selectedTransfers.includes(index)) {
+                    selectedTransfers.push(index);
+                }
+            } else {
+                selectedTransfers = selectedTransfers.filter(i => i !== index);
+            }
+            
+            // Update visual state
+            const parentDiv = checkbox.closest('.form-check');
+            if (checkbox.checked) {
+                parentDiv.classList.add('bg-light', 'border-primary');
+            } else {
+                parentDiv.classList.remove('bg-light', 'border-primary');
+            }
+            
+            document.getElementById('execute-btn').disabled = selectedTransfers.length === 0;
+        }
+        
+        function executeTransfers() {
+            if (selectedTransfers.length === 0) {
+                alert('Please select at least one transfer to execute.');
+                return;
+            }
+            
+            const transferCount = selectedTransfers.length;
+            const confirmed = confirm(
+                `⚠️ IMPORTANT: This will make REAL transfers to your FPL team!\\n\\n` +
+                `You are about to execute ${transferCount} transfer(s). This action:\\n` +
+                `• Will affect your actual FPL team\\n` +
+                `• Cannot be undone\\n` +
+                `• May use your free transfers or cost points\\n\\n` +
+                `Are you absolutely sure you want to proceed?`
+            );
+            
+            if (!confirmed) return;
+            
+            // Show loading state
+            const executeBtn = document.getElementById('execute-btn');
+            const originalText = executeBtn.innerHTML;
+            executeBtn.innerHTML = '⏳ Executing...';
+            executeBtn.disabled = true;
+            
+            fetch('/execute-transfers', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    transfer_indices: selectedTransfers,
+                    confirm: true
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    alert(`✅ Success!\\n\\n${data.message}\\n\\nYour FPL team has been updated.`);
+                    selectedTransfers = [];
+                    refreshTeamData(); // Refresh to show updated team status
+                } else {
+                    alert(`❌ Transfer Failed\\n\\n${data.message}\\n\\nNo changes were made to your team.`);
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('❌ Transfer execution failed due to a connection error. Please check your internet connection and try again.');
+            })
+            .finally(() => {
+                executeBtn.innerHTML = originalText;
+                executeBtn.disabled = selectedTransfers.length === 0;
+            });
         }
         
         function getStatusClass(status) {
