@@ -117,52 +117,6 @@ sys.exit(1)
 ‘color’: ‘info’,
 ‘estimated_time’: ‘2-5 minutes’
 }
-} session
-gw = get_next_gameweek()
-players = get_players_for_gameweek(gw, session=session)
-print(f”Simple prediction: Found {len(players)} players for gameweek {gw}”)
-print(“Basic form-based predictions would go here”)
-print(“This is a placeholder for memory-efficient predictions”)
-except Exception as e:
-print(f”Simple prediction failed: {e}”)
-sys.exit(1)
-‘’’],
-‘icon’: ‘🎯’,
-‘color’: ‘success’,
-‘estimated_time’: ‘1-3 minutes’
-},
-‘optimize_team’: {
-‘name’: ‘Optimize Team’,
-‘description’: ‘Calculate optimal transfers and team selection’,
-‘command’: [‘airsenal_run_optimization’],
-‘icon’: ‘⚡’,
-‘color’: ‘danger’,
-‘estimated_time’: ‘3-8 minutes’
-},
-‘check_data’: {
-‘name’: ‘Check Data’,
-‘description’: ‘Run data sanity checks on the database’,
-‘command’: [‘airsenal_check_data’],
-‘icon’: ‘✅’,
-‘color’: ‘secondary’,
-‘estimated_time’: ‘1-2 minutes’
-},
-‘check_db_status’: {
-‘name’: ‘Check DB Status’,
-‘description’: ‘Quick check if database is properly initialized’,
-‘command’: [‘python’, ‘-c’, ‘from airsenal.framework.schema import session; from airsenal.framework.utils import CURRENT_SEASON; print(f”Database OK for season {CURRENT_SEASON}”)’],
-‘icon’: ‘🔍’,
-‘color’: ‘secondary’,
-‘estimated_time’: ‘10 seconds’
-},
-‘get_transfers’: {
-‘name’: ‘Get Transfer Suggestions’,
-‘description’: ‘Generate and display recommended transfers without executing them’,
-‘command’: [‘python’, ‘-c’, ‘from airsenal.scripts.fill_transfersuggestion_table import main; main()’],
-‘icon’: ‘💡’,
-‘color’: ‘info’,
-‘estimated_time’: ‘2-5 minutes’
-}
 }
 
 def parse_process_output(process_id, line):
@@ -397,6 +351,38 @@ HTML_TEMPLATE = “””
                 <strong>FPL Team ID:</strong><br>
                 <span class="text-muted">{{ fpl_team_id or 'Not configured' }}</span>
             </div>
+            <div class="info-card">
+                <strong>Server Time:</strong><br>
+                <span class="text-muted">{{ current_time }}</span>
+            </div>
+            <div class="info-card">
+                <strong>Active Processes:</strong><br>
+                <span class="text-muted" id="active-count">{{ active_processes }}</span>
+            </div>
+            <div class="info-card">
+                <strong>Memory Optimized:</strong><br>
+                <span class="text-success">✅ Lightweight mode</span>
+            </div>
+        </div>
+        
+        <div class="row mb-4">
+            <div class="col-12">
+                <h3>🎮 Memory-Optimized Actions</h3>
+                <div class="alert alert-warning">
+                    <strong>⚠️ Memory Limit:</strong> Full database setup may exceed 512MB limit. Consider upgrading to Render Pro for reliable predictions.
+                    <br><strong>💡 Alternative:</strong> Use "Simple Predictions" for memory-efficient analysis.
+                </div>
+                <button class="btn btn-primary btn-process" onclick="runProcess('setup_db_full')">🗄️ Setup DB (Full)</button>
+                <button class="btn btn-info btn-process" onclick="runProcess('setup_db_minimal')">🗃️ Setup DB (Minimal)</button>
+                <button class="btn btn-warning btn-process" onclick="runProcess('update_db_lite')">🔄 Update Database</button>
+                <button class="btn btn-success btn-process" onclick="runProcess('run_predictions_simple')">🎯 Simple Predictions</button>
+                <button class="btn btn-success btn-process" onclick="runProcess('run_predictions')">🔮 Full Predictions</button>
+                <button class="btn btn-danger btn-process" onclick="runProcess('optimize_team')">⚡ Optimize Team</button>
+                <button class="btn btn-primary btn-process" onclick="runProcess('get_transfers')">💡 Get Transfers</button>
+                <button class="btn btn-success btn-process" onclick="showTransferManager()">🔄 Manage Transfers</button>
+                <button class="btn btn-outline-secondary btn-process" onclick="clearAllLogs()">🗑️ Clear Logs</button>
+            </div>
+        </div>
         
         <!-- Transfer Management Section -->
         <div class="row mb-4" id="transfer-section" style="display: none;">
@@ -445,37 +431,6 @@ HTML_TEMPLATE = “””
                 </div>
             </div>
         </div>
-            <div class="info-card">
-                <strong>Server Time:</strong><br>
-                <span class="text-muted">{{ current_time }}</span>
-            </div>
-            <div class="info-card">
-                <strong>Active Processes:</strong><br>
-                <span class="text-muted" id="active-count">{{ active_processes }}</span>
-            </div>
-            <div class="info-card">
-                <strong>Memory Optimized:</strong><br>
-                <span class="text-success">✅ Lightweight mode</span>
-            </div>
-        </div>
-        
-        <div class="row mb-4">
-            <div class="col-12">
-                <h3>🎮 Memory-Optimized Actions</h3>
-                <div class="alert alert-info">
-                    <strong>💡 Tip:</strong> Run processes individually to avoid memory issues. Wait for each to complete before starting the next.
-                </div>
-                <button class="btn btn-primary btn-process" onclick="runProcess('setup_db_full')">🗄️ Setup DB (Full)</button>
-                <button class="btn btn-info btn-process" onclick="runProcess('setup_db_minimal')">🗃️ Setup DB (Minimal)</button>
-                <button class="btn btn-warning btn-process" onclick="runProcess('update_db_lite')">🔄 Update Database</button>
-                <button class="btn btn-success btn-process" onclick="runProcess('run_predictions_simple')">🎯 Simple Predictions</button>
-                <button class="btn btn-success btn-process" onclick="runProcess('run_predictions')">🔮 Full Predictions</button>
-                <button class="btn btn-danger btn-process" onclick="runProcess('optimize_team')">⚡ Optimize Team</button>
-                <button class="btn btn-primary btn-process" onclick="runProcess('get_transfers')">💡 Get Transfers</button>
-                <button class="btn btn-success btn-process" onclick="showTransferManager()">🔄 Manage Transfers</button>
-                <button class="btn btn-outline-secondary btn-process" onclick="clearAllLogs()">🗑️ Clear Logs</button>
-            </div>
-        </div>
         
         <h3>📊 Process Monitor</h3>
         <div class="process-grid" id="process-grid">
@@ -508,9 +463,14 @@ HTML_TEMPLATE = “””
     
     // Process data passed from Python
     const processes = {
+        'setup_db_full': {
+            'name': 'Setup Database (Full)',
+            'icon': '🗄️',
+            'color': 'primary'
+        },
         'setup_db_minimal': {
             'name': 'Setup Database (Minimal)',
-            'icon': '🗄️',
+            'icon': '🗃️',
             'color': 'info'
         },
         'update_db_lite': {
@@ -519,8 +479,13 @@ HTML_TEMPLATE = “””
             'color': 'warning'
         },
         'run_predictions': {
-            'name': 'Run Predictions',
+            'name': 'Run Predictions (Full)',
             'icon': '🔮', 
+            'color': 'success'
+        },
+        'run_predictions_simple': {
+            'name': 'Simple Predictions',
+            'icon': '🎯', 
             'color': 'success'
         },
         'optimize_team': {
@@ -533,15 +498,15 @@ HTML_TEMPLATE = “””
             'icon': '✅',
             'color': 'secondary'
         },
+        'check_db_status': {
+            'name': 'Check DB Status',
+            'icon': '🔍',
+            'color': 'secondary'
+        },
         'get_transfers': {
             'name': 'Get Transfer Suggestions',
             'icon': '💡',
             'color': 'info'
-        },
-        'debug_predictions': {
-            'name': 'Debug Predictions',
-            'icon': '🔍',
-            'color': 'secondary'
         }
     };
     
@@ -578,12 +543,11 @@ HTML_TEMPLATE = “””
                             <span class="process-icon">${info.icon}</span>
                             <div class="flex-grow-1">
                                 <h5 class="mb-0">${info.name}</h5>
-                                <small class="text-muted">${info.estimated_time}</small>
+                                <small class="text-muted">Est. time varies</small>
                             </div>
                             <span class="badge bg-${statusClass} status-badge">${processData.status}</span>
                         </div>
                         <div class="card-body">
-                            <p class="card-text text-muted mb-3">${info.description}</p>
                             <div class="mb-2">
                                 <small class="text-muted">Current Step:</small><br>
                                 <span class="fw-bold">${processData.current_step}</span>
