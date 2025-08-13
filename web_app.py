@@ -15,6 +15,11 @@ from flask import Flask, render_template_string, jsonify, request
 
 app = Flask(__name__)
 
+# Add custom JSON filter for Jinja2
+@app.template_filter('tojson')
+def to_json_filter(obj):
+    return json.dumps(obj)
+
 # Global variables to track status
 processes = {}
 output_logs = {}
@@ -349,7 +354,39 @@ HTML_TEMPLATE = """
         let refreshInterval;
         let selectedLogProcess = '';
         
-        const processes = {{ processes | tojsonfilter }};
+        // Process data passed from Python
+        const processes = {
+            'setup_db_minimal': {
+                'name': 'Setup Database (Minimal)',
+                'icon': '🗄️',
+                'color': 'info'
+            },
+            'update_db_lite': {
+                'name': 'Update Database (Lite)', 
+                'icon': '🔄',
+                'color': 'warning'
+            },
+            'run_predictions': {
+                'name': 'Run Predictions',
+                'icon': '🔮', 
+                'color': 'success'
+            },
+            'optimize_team': {
+                'name': 'Optimize Team',
+                'icon': '⚡',
+                'color': 'danger'
+            },
+            'check_data': {
+                'name': 'Check Data',
+                'icon': '✅',
+                'color': 'secondary'
+            },
+            'get_transfers': {
+                'name': 'Get Transfer Suggestions',
+                'icon': '💡',
+                'color': 'info'
+            }
+        };
         
         function updateProcessGrid() {
             fetch('/status/all')
@@ -502,8 +539,7 @@ def dashboard():
         HTML_TEMPLATE,
         current_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         fpl_team_id=os.getenv('FPL_TEAM_ID'),
-        active_processes=active_processes,
-        processes=AIRSENAL_PROCESSES
+        active_processes=active_processes
     )
 
 @app.route('/run-process/<process_id>', methods=['POST'])
