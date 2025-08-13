@@ -28,11 +28,19 @@ team_status = {}
 
 # AIrsenal process definitions
 AIRSENAL_PROCESSES = {
-    'setup_db_minimal': {
-        'name': 'Setup Database (Minimal)',
-        'description': 'Initialize database with current season data only (memory efficient)',
+    'setup_db_full': {
+        'name': 'Setup Database (Full)',
+        'description': 'Initialize database with multiple seasons of historical data (required for predictions)',
         'command': ['airsenal_setup_initial_db'],
         'icon': '🗄️',
+        'color': 'primary',
+        'estimated_time': '10-20 minutes'
+    },
+    'setup_db_minimal': {
+        'name': 'Setup Database (Minimal)',
+        'description': 'Initialize database with current season data only (may not work for predictions)',
+        'command': ['airsenal_setup_initial_db', '--current-season-only'],
+        'icon': '🗃️',
         'color': 'info',
         'estimated_time': '3-8 minutes'
     },
@@ -52,6 +60,14 @@ AIRSENAL_PROCESSES = {
         'color': 'success',
         'estimated_time': '5-10 minutes'
     },
+    'run_predictions_lite': {
+        'name': 'Run Predictions (Lite)',
+        'description': 'Generate basic predictions without heavy ML models',
+        'command': ['python', '-c', 'print("Basic prediction simulation - replace with actual lite prediction")'],
+        'icon': '🔮',
+        'color': 'info',
+        'estimated_time': '1-2 minutes'
+    },
     'optimize_team': {
         'name': 'Optimize Team',
         'description': 'Calculate optimal transfers and team selection',
@@ -67,6 +83,14 @@ AIRSENAL_PROCESSES = {
         'icon': '✅',
         'color': 'secondary',
         'estimated_time': '1-2 minutes'
+    },
+    'check_db_status': {
+        'name': 'Check DB Status',
+        'description': 'Quick check if database is properly initialized',
+        'command': ['python', '-c', 'from airsenal.framework.schema import session; from airsenal.framework.utils import CURRENT_SEASON; print(f"Database OK for season {CURRENT_SEASON}")'],
+        'icon': '🔍',
+        'color': 'secondary',
+        'estimated_time': '10 seconds'
     },
     'get_transfers': {
         'name': 'Get Transfer Suggestions',
@@ -436,6 +460,11 @@ HTML_TEMPLATE = """
                 'name': 'Get Transfer Suggestions',
                 'icon': '💡',
                 'color': 'info'
+            },
+            'debug_predictions': {
+                'name': 'Debug Predictions',
+                'icon': '🔍',
+                'color': 'secondary'
             }
         };
         
@@ -778,8 +807,54 @@ def get_all_status():
     """API endpoint to get status of all processes"""
     return jsonify({
         "processes": processes,
-        "logs": {pid: logs[-20:] for pid, logs in output_logs.items()}
+        "logs": {pid: logs[-20:] for pid, logs in output_logs.items()},
+        "transfers": current_transfers
     })
+
+@app.route('/team-status')
+def get_team_status():
+    """API endpoint to get current team status and transfers"""
+    get_current_team_status()  # Refresh the data
+    return jsonify({
+        "team_status": team_status,
+        "transfers": current_transfers
+    })
+
+@app.route('/execute-transfers', methods=['POST'])
+def execute_transfers_endpoint():
+    """API endpoint to execute selected transfers"""
+    data = request.get_json()
+    transfer_indices = data.get('transfer_indices', [])
+    confirm = data.get('confirm', False)
+    
+    if not transfer_indices:
+        return jsonify({"status": "error", "message": "No transfers selected"})
+    
+    if not confirm:
+        return jsonify({"status": "error", "message": "Transfer confirmation required"})
+    
+    # Check if we have FPL credentials
+    if not os.getenv('FPL_LOGIN') or not os.getenv('FPL_PASSWORD'):
+        return jsonify({
+            "status": "error", 
+            "message": "FPL login credentials not configured. Please set FPL_LOGIN and FPL_PASSWORD environment variables."
+        })
+    
+    # Get selected transfers
+    if not current_transfers:
+        return jsonify({"status": "error", "message": "No transfer suggestions available. Run 'Get Transfer Suggestions' first."})
+    
+    selected_transfers = []
+    for i in transfer_indices:
+        if i < len(current_transfers):
+            selected_transfers.append(current_transfers[i])
+    
+    if not selected_transfers:
+        return jsonify({"status": "error", "message": "Invalid transfer selection"})
+    
+    # Execute transfers
+    result = execute_transfers(selected_transfers, confirm=confirm)
+    return jsonify(result)
 
 @app.route('/logs/<process_id>')
 def get_process_logs(process_id):
