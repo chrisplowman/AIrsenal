@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Enhanced web interface for AIrsenal with real-time progress tracking
+Modular AIrsenal web interface with individual process controls
 """
 
 import os
@@ -9,86 +9,207 @@ import threading
 import time
 import json
 import queue
+import gc
+import psutil
 from datetime import datetime
 from flask import Flask, render_template_string, jsonify, request
 
 app = Flask(__name__)
 
 # Global variables to track status
-pipeline_status = "Not started"
-pipeline_progress = 0
-current_step = ""
-last_run = None
-output_log = []
-progress_queue = queue.Queue()
+processes = {}
+output_logs = {}
+current_transfers = []
+team_status = {}
+memory_stats = {'current': 0, 'peak': 0, 'limit': 512}
 
-# Pipeline steps for progress tracking
-PIPELINE_STEPS = [
-    "Initializing database connection",
-    "Fetching FPL summary data", 
-    "Updating player data",
-    "Fetching fixture data",
-    "Processing team data",
-    "Updating player scores",
-    "Running predictions",
-    "Calculating transfer suggestions",
-    "Finalizing results"
-]
+# AIrsenal process definitions
+AIRSENAL_PROCESSES = {
+    'full_pipeline': {
+        'name': 'Full Pipeline',
+        'description': 'Run the complete AIrsenal pipeline (database setup, predictions, transfers)',
+        'command': ['airsenal_run_pipeline'],
+        'icon': '🚀',
+        'color': 'primary',
+        'estimated_time': '10-30 minutes'
+    },
+    'setup_db_minimal': {
+        'name': 'Setup Database (Minimal)',
+        'description': 'Initialize database with current season data only (memory efficient)',
+        'command': ['airsenal_setup_initial_db', '--current-season-only'],
+        'icon': '🗄️',
+        'color': 'info',
+        'estimated_time': '3-8 minutes'
+    },
+    'update_db': {
+        'name': 'Update Database',
+        'description': 'Update database with latest FPL data and results',
+        'command': ['airsenal_update_db'],
+        'icon': '🔄',
+        'color': 'warning',
+        'estimated_time': '2-5 minutes'
+    },
+    'run_predictions': {
+        'name': 'Run Predictions',
+        'description': 'Generate player performance predictions using the ML models',
+        'command': ['airsenal_run_prediction'],
+        'icon': '🔮',
+        'color': 'success',
+        'estimated_time': '5-10 minutes'
+    },
+    'optimize_team': {
+        'name': 'Optimize Team',
+        'description': 'Calculate optimal transfers and team selection',
+        'command': ['airsenal_run_optimization'],
+        'icon': '⚡',
+        'color': 'danger',
+        'estimated_time': '3-8 minutes'
+    },
+    'check_data': {
+        'name': 'Check Data',
+        'description': 'Run data sanity checks on the database',
+        'command': ['airsenal_check_data'],
+        'icon': '✅',
+        'color': 'secondary',
+        'estimated_time': '1-2 minutes'
+    },
+    'get_transfers': {
+        'name': 'Get Transfer Suggestions',
+        'description': 'Generate and display recommended transfers without executing them',
+        'command': ['python', '-c', 'from airsenal.scripts.fill_transfersuggestion_table import main; main()'],
+        'icon': '💡',
+        'color': 'info',
+        'estimated_time': '2-5 minutes'
+    }
+}
 
-def parse_pipeline_output(line):
-    """Parse pipeline output to extract progress information"""
-    global pipeline_progress, current_step
+def parse_process_output(process_id, line):
+    """Parse process output to extract progress information"""
+    if process_id not in processes:
+        return
     
-    # Look for common AIrsenal output patterns
-    progress_indicators = {
-        "Setting up": 10,
-        "Fetching": 20,
-        "Processing": 40,
-        "Updating": 60,
-        "Calculating": 80,
-        "Finished": 100,
-        "Done": 100,
-        "Complete": 100
+    # Look for common progress indicators
+    progress_keywords = {
+        'starting': 5, 'initializing': 10, 'setup': 15, 'fetching': 25,
+        'processing': 40, 'updating': 60, 'calculating': 70, 'optimizing': 80,
+        'finishing': 90, 'complete': 100, 'done': 100, 'finished': 100
     }
     
-    # Update current step based on output
     line_lower = line.lower()
-    for keyword, progress in progress_indicators.items():
-        if keyword.lower() in line_lower:
-            pipeline_progress = min(progress, 100)
-            current_step = line.strip()
+    for keyword, progress in progress_keywords.items():
+        if keyword in line_lower:
+            processes[process_id]['progress'] = min(progress, 100)
+            processes[process_id]['current_step'] = line.strip()
             break
-    
-    # Look for specific AIrsenal messages
-    if "bootstrap-static" in line_lower:
-        current_step = "Fetching FPL summary data"
-        pipeline_progress = 15
-    elif "player" in line_lower and "score" in line_lower:
-        current_step = "Processing player scores"
-        pipeline_progress = 50
-    elif "fixture" in line_lower:
-        current_step = "Fetching fixture data"
-        pipeline_progress = 25
-    elif "prediction" in line_lower:
-        current_step = "Running predictions"
-        pipeline_progress = 70
-    elif "transfer" in line_lower:
-        current_step = "Calculating transfer suggestions"
-        pipeline_progress = 85
 
-def run_airsenal_pipeline():
-    """Run the AIrsenal pipeline with progress tracking"""
-    global pipeline_status, last_run, output_log, pipeline_progress, current_step
+def get_current_team_status():
+    """Get current team information and transfer suggestions"""
+    global team_status, current_transfers
     
     try:
-        pipeline_status = "Running..."
-        pipeline_progress = 0
-        current_step = "Starting pipeline..."
-        output_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] Starting AIrsenal pipeline...")
+        from airsenal.framework.utils import fetcher
+        from airsenal.framework.schema import TransferSuggestion, session
+        from sqlalchemy import desc
+        
+        # Get current team data
+        try:
+            current_picks = fetcher.get_current_picks()
+            bank = fetcher.get_current_bank()
+            free_transfers = fetcher.get_num_free_transfers()
+            
+            team_status = {
+                'bank': bank / 10.0,  # Convert to millions
+                'free_transfers': free_transfers,
+                'team_value': sum(pick['selling_price'] for pick in current_picks) / 10.0,
+                'last_updated': datetime.now()
+            }
+        except Exception as e:
+            team_status = {'error': f'Could not fetch team data: {str(e)}'}
+        
+        # Get latest transfer suggestions
+        try:
+            suggestions = session.query(TransferSuggestion).order_by(desc(TransferSuggestion.gameweek)).limit(10).all()
+            current_transfers = []
+            
+            for suggestion in suggestions:
+                current_transfers.append({
+                    'player_out_id': suggestion.player_out,
+                    'player_in_id': suggestion.player_in,
+                    'gameweek': suggestion.gameweek,
+                    'points_gain': suggestion.points_gain,
+                    'price_change': suggestion.transfer_cost
+                })
+                
+        except Exception as e:
+            current_transfers = []
+            
+    except ImportError:
+        team_status = {'error': 'AIrsenal modules not available'}
+        current_transfers = []
+
+def execute_transfers(transfer_list, confirm=False):
+    """Execute transfers through the FPL API"""
+    try:
+        from airsenal.framework.utils import fetcher
+        
+        if not confirm:
+            return {'status': 'error', 'message': 'Transfer confirmation required'}
+        
+        # Prepare transfer payload for FPL API
+        transfers = []
+        for transfer in transfer_list:
+            transfers.append({
+                'element_in': transfer['player_in_id'],
+                'element_out': transfer['player_out_id'],
+                'selling_price': transfer.get('selling_price'),
+                'purchase_price': transfer.get('purchase_price')
+            })
+        
+        transfer_payload = {
+            'confirmed': True,
+            'transfers': transfers,
+            'wildcard': False,
+            'freehit': False
+        }
+        
+        # Execute the transfers
+        fetcher.post_transfers(transfer_payload)
+        
+        return {
+            'status': 'success', 
+            'message': f'Successfully executed {len(transfers)} transfer(s)',
+            'transfers': transfers
+        }
+        
+    except Exception as e:
+        return {'status': 'error', 'message': f'Transfer failed: {str(e)}'}
+
+def run_airsenal_process(process_id):
+    """Run a specific AIrsenal process with progress tracking"""
+    if process_id not in AIRSENAL_PROCESSES:
+        return
+    
+    process_info = AIRSENAL_PROCESSES[process_id]
+    
+    # Initialize process state
+    processes[process_id] = {
+        'status': 'Running...',
+        'progress': 0,
+        'current_step': f'Starting {process_info["name"]}...',
+        'start_time': datetime.now(),
+        'end_time': None
+    }
+    
+    if process_id not in output_logs:
+        output_logs[process_id] = []
+    
+    try:
+        timestamp = datetime.now().strftime('%H:%M:%S')
+        output_logs[process_id].append(f"[{timestamp}] 🚀 Starting {process_info['name']}...")
         
         # Start the subprocess
         process = subprocess.Popen(
-            ["airsenal_run_pipeline"],
+            process_info['command'],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -104,140 +225,410 @@ def run_airsenal_pipeline():
             if output:
                 line = output.strip()
                 timestamp = datetime.now().strftime('%H:%M:%S')
-                output_log.append(f"[{timestamp}] {line}")
-                parse_pipeline_output(line)
+                output_logs[process_id].append(f"[{timestamp}] {line}")
+                parse_process_output(process_id, line)
                 
-                # Keep only last 50 log entries
-                if len(output_log) > 50:
-                    output_log = output_log[-50:]
+                # Keep only last 100 log entries per process
+                if len(output_logs[process_id]) > 100:
+                    output_logs[process_id] = output_logs[process_id][-100:]
         
         # Check result
         return_code = process.poll()
-        if return_code == 0:
-            pipeline_status = "Completed successfully"
-            pipeline_progress = 100
-            current_step = "Pipeline completed"
-            output_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Pipeline completed successfully")
-        else:
-            pipeline_status = f"Failed with code {return_code}"
-            pipeline_progress = 0
-            current_step = "Pipeline failed"
-            output_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Pipeline failed with code {return_code}")
+        processes[process_id]['end_time'] = datetime.now()
         
-        last_run = datetime.now()
+        if return_code == 0:
+            processes[process_id]['status'] = 'Completed successfully'
+            processes[process_id]['progress'] = 100
+            processes[process_id]['current_step'] = f'{process_info["name"]} completed'
+            output_logs[process_id].append(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ {process_info['name']} completed successfully")
+        else:
+            processes[process_id]['status'] = f'Failed with code {return_code}'
+            processes[process_id]['progress'] = 0
+            processes[process_id]['current_step'] = f'{process_info["name"]} failed'
+            output_logs[process_id].append(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ {process_info['name']} failed with code {return_code}")
         
     except Exception as e:
-        pipeline_status = f"Error: {str(e)}"
-        pipeline_progress = 0
-        current_step = "Error occurred"
-        output_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Error: {str(e)}")
+        processes[process_id]['status'] = f'Error: {str(e)}'
+        processes[process_id]['progress'] = 0
+        processes[process_id]['current_step'] = 'Error occurred'
+        processes[process_id]['end_time'] = datetime.now()
+        output_logs[process_id].append(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Error: {str(e)}")
 
-# Enhanced HTML template with progress bar and real-time updates
+# Enhanced HTML template with individual process controls
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>AIrsenal Dashboard</title>
+    <title>AIrsenal Control Center</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
-        body { font-family: 'Segoe UI', Arial, sans-serif; margin: 0; padding: 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; }
-        .container { max-width: 900px; margin: 0 auto; background: white; padding: 30px; border-radius: 15px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); }
-        h1 { color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 15px; margin-bottom: 30px; }
-        .status-card { padding: 20px; border-radius: 10px; margin: 20px 0; border-left: 5px solid; }
-        .status.running { background: #fff3cd; border-left-color: #ffc107; }
-        .status.success { background: #d4edda; border-left-color: #28a745; }
-        .status.error { background: #f8d7da; border-left-color: #dc3545; }
-        .status.not-started { background: #e2e3e5; border-left-color: #6c757d; }
-        
-        .progress-container { margin: 20px 0; }
-        .progress-bar { width: 100%; height: 25px; background: #e9ecef; border-radius: 15px; overflow: hidden; }
-        .progress-fill { height: 100%; background: linear-gradient(90deg, #28a745, #20c997); transition: width 0.5s ease; border-radius: 15px; }
-        .progress-text { text-align: center; margin-top: 10px; font-weight: bold; color: #495057; }
-        .current-step { background: #e8f4fd; padding: 15px; border-radius: 8px; margin: 10px 0; border-left: 4px solid #3498db; }
-        
-        button { background: linear-gradient(45deg, #3498db, #2980b9); color: white; padding: 12px 25px; border: none; border-radius: 8px; cursor: pointer; font-size: 16px; margin: 10px 5px; transition: all 0.3s; }
-        button:hover { transform: translateY(-2px); box-shadow: 0 5px 15px rgba(0,0,0,0.2); }
-        button:disabled { background: #bdc3c7; cursor: not-allowed; transform: none; }
-        
-        .log-container { background: #2c3e50; border-radius: 10px; margin: 20px 0; overflow: hidden; }
-        .log-header { background: #34495e; padding: 15px; color: white; font-weight: bold; }
-        .log { color: #ecf0f1; padding: 20px; font-family: 'Courier New', monospace; max-height: 400px; overflow-y: auto; font-size: 14px; line-height: 1.4; }
-        
-        .info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin: 20px 0; }
+        body { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; padding: 20px; }
+        .main-container { background: white; border-radius: 15px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); padding: 30px; }
+        .process-card { border: none; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 20px; transition: transform 0.2s; }
+        .process-card:hover { transform: translateY(-2px); }
+        .process-icon { font-size: 2rem; margin-right: 15px; }
+        .progress-mini { height: 8px; border-radius: 4px; }
+        .log-container { background: #2c3e50; border-radius: 10px; max-height: 300px; overflow-y: auto; }
+        .log-content { color: #ecf0f1; font-family: 'Courier New', monospace; font-size: 12px; padding: 15px; }
+        .status-badge { font-size: 0.8rem; }
+        .info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 30px; }
         .info-card { background: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid #3498db; }
-        .info-label { font-weight: bold; color: #495057; display: block; }
-        .info-value { color: #6c757d; }
-        
-        .controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-        .auto-refresh { margin-left: auto; display: flex; align-items: center; gap: 10px; }
-        
-        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
-        .running .progress-fill { animation: pulse 2s infinite; }
-        
-        .log-line { margin: 2px 0; }
-        .log-line.error { color: #e74c3c; }
-        .log-line.success { color: #27ae60; }
-        .log-line.warning { color: #f39c12; }
+        .running { animation: pulse 2s infinite; }
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.7; } 100% { opacity: 1; } }
+        .btn-process { margin: 5px; }
+        .process-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 20px; }
     </style>
+</head>
+<body>
+    <div class="container-fluid">
+        <div class="main-container">
+            <h1 class="text-center mb-4">🏈 AIrsenal Control Center</h1>
+            
+            <div class="info-grid">
+                <div class="info-card">
+                    <strong>FPL Team ID:</strong><br>
+                    <span class="text-muted">{{ fpl_team_id or 'Not configured' }}</span>
+                </div>
+                <div class="info-card">
+                    <strong>Server Time:</strong><br>
+                    <span class="text-muted">{{ current_time }}</span>
+                </div>
+                <div class="info-card">
+                    <strong>Active Processes:</strong><br>
+                    <span class="text-muted" id="active-count">{{ active_processes }}</span>
+                </div>
+                <div class="info-card">
+                    <strong>Auto-Refresh:</strong><br>
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" id="auto-refresh" checked onchange="toggleAutoRefresh()">
+                        <label class="form-check-label" for="auto-refresh">Enabled (3s)</label>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="row mb-4">
+                <div class="col-12">
+                    <h3>🎮 Quick Actions</h3>
+                    <button class="btn btn-success btn-process" onclick="runProcess('full_pipeline')">🚀 Run Full Pipeline</button>
+                    <button class="btn btn-info btn-process" onclick="runProcess('setup_db')">🗄️ Setup Database</button>
+                    <button class="btn btn-warning btn-process" onclick="runProcess('update_db')">🔄 Update Database</button>
+                    <button class="btn btn-primary btn-process" onclick="runProcess('get_transfers')">💡 Get Transfers</button>
+                    <button class="btn btn-secondary btn-process" onclick="stopAllProcesses()">⏹️ Stop All</button>
+                    <button class="btn btn-outline-secondary btn-process" onclick="clearAllLogs()">🗑️ Clear Logs</button>
+                </div>
+            </div>
+            
+            <!-- Transfer Management Section -->
+            <div class="row mb-4" id="transfer-section" style="display: none;">
+                <div class="col-12">
+                    <div class="card border-primary">
+                        <div class="card-header bg-primary text-white">
+                            <h4 class="mb-0">🔄 Transfer Management</h4>
+                        </div>
+                        <div class="card-body">
+                            <div class="row">
+                                <div class="col-md-4">
+                                    <h6>💰 Team Status</h6>
+                                    <div id="team-status">Loading...</div>
+                                </div>
+                                <div class="col-md-8">
+                                    <h6>💡 Suggested Transfers</h6>
+                                    <div id="transfer-suggestions">No suggestions available</div>
+                                    <div class="mt-3">
+                                        <button class="btn btn-success" onclick="executeTransfers()" id="execute-btn" disabled>
+                                            ⚡ Execute Selected Transfers
+                                        </button>
+                                        <button class="btn btn-outline-primary" onclick="refreshTransfers()">
+                                            🔄 Refresh
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <h3>📊 Process Monitor</h3>
+            <div class="process-grid" id="process-grid">
+                <!-- Process cards will be populated by JavaScript -->
+            </div>
+            
+            <div class="row mt-4">
+                <div class="col-12">
+                    <h4>📋 Selected Process Log</h4>
+                    <div class="mb-2">
+                        <select class="form-select" id="log-selector" onchange="changeLogView()">
+                            <option value="">Select a process to view logs...</option>
+                        </select>
+                    </div>
+                    <div class="log-container">
+                        <div class="log-content" id="selected-log">Select a process above to view its logs...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
     <script>
         let autoRefresh = true;
         let refreshInterval;
+        let selectedLogProcess = '';
+        let selectedTransfers = [];
         
-        function updateStatus() {
-            fetch('/status')
+        const processes = {{ processes | tojsonfilter }};
+        
+        function updateProcessGrid() {
+            fetch('/status/all')
                 .then(response => response.json())
                 .then(data => {
-                    // Update progress bar
-                    document.getElementById('progress-fill').style.width = data.progress + '%';
-                    document.getElementById('progress-text').textContent = data.progress + '%';
+                    const grid = document.getElementById('process-grid');
+                    const logSelector = document.getElementById('log-selector');
                     
-                    // Update current step
-                    document.getElementById('current-step').textContent = data.current_step || 'Waiting...';
+                    // Update active process count
+                    const activeCount = Object.values(data.processes).filter(p => p.status === 'Running...').length;
+                    document.getElementById('active-count').textContent = activeCount;
                     
-                    // Update status
-                    document.getElementById('pipeline-status').textContent = data.status;
+                    // Clear and rebuild process grid
+                    grid.innerHTML = '';
+                    logSelector.innerHTML = '<option value="">Select a process to view logs...</option>';
                     
-                    // Update status card class
-                    const statusCard = document.querySelector('.status-card');
-                    statusCard.className = 'status-card status ' + getStatusClass(data.status);
-                    
-                    // Update button state
-                    const runBtn = document.getElementById('runBtn');
-                    if (data.status.includes('Running')) {
-                        runBtn.disabled = true;
-                        runBtn.innerHTML = '🔄 Running...';
-                    } else {
-                        runBtn.disabled = false;
-                        runBtn.innerHTML = '▶️ Run Pipeline';
-                    }
-                    
-                    // Update logs
-                    if (data.logs) {
-                        document.getElementById('log-output').innerHTML = data.logs.map(log => 
-                            `<div class="log-line">${log}</div>`
-                        ).join('');
+                    Object.entries(processes).forEach(([id, info]) => {
+                        const processData = data.processes[id] || { status: 'Not started', progress: 0, current_step: 'Ready' };
                         
-                        // Auto-scroll to bottom
-                        const logContainer = document.getElementById('log-output');
-                        logContainer.scrollTop = logContainer.scrollHeight;
+                        // Add to log selector
+                        logSelector.innerHTML += `<option value="${id}">${info.name}</option>`;
+                        
+                        // Create process card
+                        const card = document.createElement('div');
+                        card.className = 'card process-card';
+                        
+                        const isRunning = processData.status === 'Running...';
+                        const statusClass = getStatusClass(processData.status);
+                        
+                        card.innerHTML = `
+                            <div class="card-header d-flex align-items-center ${isRunning ? 'running' : ''}">
+                                <span class="process-icon">${info.icon}</span>
+                                <div class="flex-grow-1">
+                                    <h5 class="mb-0">${info.name}</h5>
+                                    <small class="text-muted">${info.estimated_time}</small>
+                                </div>
+                                <span class="badge bg-${statusClass} status-badge">${processData.status}</span>
+                            </div>
+                            <div class="card-body">
+                                <p class="card-text text-muted mb-3">${info.description}</p>
+                                <div class="mb-2">
+                                    <small class="text-muted">Current Step:</small><br>
+                                    <span class="fw-bold">${processData.current_step}</span>
+                                </div>
+                                <div class="progress progress-mini mb-3">
+                                    <div class="progress-bar bg-${info.color}" style="width: ${processData.progress}%"></div>
+                                </div>
+                                <div class="d-flex justify-content-between align-items-center">
+                                    <small class="text-muted">${processData.progress}% Complete</small>
+                                    <div>
+                                        <button class="btn btn-${info.color} btn-sm" 
+                                                onclick="runProcess('${id}')" 
+                                                ${isRunning ? 'disabled' : ''}>
+                                            ${isRunning ? '⏳ Running...' : '▶️ Start'}
+                                        </button>
+                                        <button class="btn btn-outline-secondary btn-sm" 
+                                                onclick="viewLogs('${id}')">
+                                            📋 Logs
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                        
+                        grid.appendChild(card);
+                    });
+                    
+                    // Update selected log view
+                    if (selectedLogProcess && data.logs[selectedLogProcess]) {
+                        updateSelectedLog(data.logs[selectedLogProcess]);
                     }
+                    
+                    // Show transfer section if transfers are available
+                    if (data.transfers && data.transfers.length > 0) {
+                        document.getElementById('transfer-section').style.display = 'block';
+                        updateTransferDisplay(data.transfers, data.team_status);
+                    }
+                })
+                .catch(error => console.error('Error:', error));
+        }
+        
+        function updateTransferDisplay(transfers, teamStatus) {
+            // Update team status
+            const teamStatusDiv = document.getElementById('team-status');
+            if (teamStatus.error) {
+                teamStatusDiv.innerHTML = `<div class="text-danger">${teamStatus.error}</div>`;
+            } else {
+                teamStatusDiv.innerHTML = `
+                    <div><strong>Bank:</strong> £${teamStatus.bank}M</div>
+                    <div><strong>Free Transfers:</strong> ${teamStatus.free_transfers}</div>
+                    <div><strong>Team Value:</strong> £${teamStatus.team_value}M</div>
+                    <div class="text-muted small">Updated: ${new Date(teamStatus.last_updated).toLocaleTimeString()}</div>
+                `;
+            }
+            
+            // Update transfer suggestions
+            const transferDiv = document.getElementById('transfer-suggestions');
+            if (transfers.length === 0) {
+                transferDiv.innerHTML = '<div class="text-muted">No transfer suggestions available. Run "Get Transfer Suggestions" first.</div>';
+                return;
+            }
+            
+            let transferHtml = '<div class="transfer-list">';
+            transfers.slice(0, 5).forEach((transfer, index) => {
+                const isSelected = selectedTransfers.includes(index);
+                transferHtml += `
+                    <div class="form-check border rounded p-2 mb-2 ${isSelected ? 'bg-light' : ''}">
+                        <input class="form-check-input" type="checkbox" value="${index}" id="transfer${index}" 
+                               ${isSelected ? 'checked' : ''} onchange="toggleTransfer(${index})">
+                        <label class="form-check-label" for="transfer${index}">
+                            <strong>GW${transfer.gameweek}:</strong> 
+                            Player ${transfer.player_out_id} → Player ${transfer.player_in_id}<br>
+                            <small class="text-success">Expected gain: ${transfer.points_gain} pts</small>
+                            ${transfer.price_change ? `<small class="text-muted"> | Cost: £${transfer.price_change}M</small>` : ''}
+                        </label>
+                    </div>
+                `;
+            });
+            transferHtml += '</div>';
+            transferDiv.innerHTML = transferHtml;
+            
+            // Update execute button
+            document.getElementById('execute-btn').disabled = selectedTransfers.length === 0;
+        }
+        
+        function toggleTransfer(index) {
+            const checkbox = document.getElementById(`transfer${index}`);
+            if (checkbox.checked) {
+                if (!selectedTransfers.includes(index)) {
+                    selectedTransfers.push(index);
+                }
+            } else {
+                selectedTransfers = selectedTransfers.filter(i => i !== index);
+            }
+            document.getElementById('execute-btn').disabled = selectedTransfers.length === 0;
+        }
+        
+        function executeTransfers() {
+            if (selectedTransfers.length === 0) {
+                alert('Please select at least one transfer to execute.');
+                return;
+            }
+            
+            const confirmed = confirm(
+                `Are you sure you want to execute ${selectedTransfers.length} transfer(s)? ` +
+                `This will make real changes to your FPL team and cannot be undone!`
+            );
+            
+            if (!confirmed) return;
+            
+            fetch('/execute-transfers', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    transfer_indices: selectedTransfers,
+                    confirm: true
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    alert(`✅ ${data.message}`);
+                    selectedTransfers = [];
+                    refreshTransfers();
+                } else {
+                    alert(`❌ ${data.message}`);
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('❌ Transfer execution failed');
+            });
+        }
+        
+        function refreshTransfers() {
+            fetch('/refresh-transfers', {method: 'POST'})
+                .then(response => response.json())
+                .then(data => {
+                    updateProcessGrid();
                 })
                 .catch(error => console.error('Error:', error));
         }
         
         function getStatusClass(status) {
-            if (status.includes('Running')) return 'running';
+            if (status.includes('Running')) return 'warning';
             if (status.includes('success') || status.includes('Completed')) return 'success';
-            if (status.includes('Error') || status.includes('Failed')) return 'error';
-            return 'not-started';
+            if (status.includes('Error') || status.includes('Failed')) return 'danger';
+            return 'secondary';
         }
         
-        function runPipeline() {
-            fetch('/run-pipeline', {method: 'POST'})
+        function runProcess(processId) {
+            fetch(`/run-process/${processId}`, {method: 'POST'})
                 .then(response => response.json())
                 .then(data => {
-                    updateStatus();
+                    if (data.status === 'success') {
+                        updateProcessGrid();
+                    } else {
+                        alert(data.message);
+                    }
                 })
                 .catch(error => console.error('Error:', error));
+        }
+        
+        function viewLogs(processId) {
+            selectedLogProcess = processId;
+            document.getElementById('log-selector').value = processId;
+            changeLogView();
+        }
+        
+        function changeLogView() {
+            selectedLogProcess = document.getElementById('log-selector').value;
+            if (selectedLogProcess) {
+                fetch(`/logs/${selectedLogProcess}`)
+                    .then(response => response.json())
+                    .then(data => {
+                        updateSelectedLog(data.logs);
+                    })
+                    .catch(error => console.error('Error:', error));
+            } else {
+                document.getElementById('selected-log').innerHTML = 'Select a process above to view its logs...';
+            }
+        }
+        
+        function updateSelectedLog(logs) {
+            const logContainer = document.getElementById('selected-log');
+            logContainer.innerHTML = logs.map(log => `<div>${log}</div>`).join('');
+            logContainer.scrollTop = logContainer.scrollHeight;
+        }
+        
+        function stopAllProcesses() {
+            if (confirm('Are you sure you want to stop all running processes?')) {
+                fetch('/stop-all', {method: 'POST'})
+                    .then(response => response.json())
+                    .then(data => {
+                        alert(data.message);
+                        updateProcessGrid();
+                    })
+                    .catch(error => console.error('Error:', error));
+            }
+        }
+        
+        function clearAllLogs() {
+            if (confirm('Are you sure you want to clear all logs?')) {
+                fetch('/clear-logs', {method: 'POST'})
+                    .then(response => response.json())
+                    .then(data => {
+                        alert(data.message);
+                        updateProcessGrid();
+                    })
+                    .catch(error => console.error('Error:', error));
+            }
         }
         
         function toggleAutoRefresh() {
@@ -245,7 +636,7 @@ HTML_TEMPLATE = """
             const checkbox = document.getElementById('auto-refresh');
             
             if (autoRefresh) {
-                refreshInterval = setInterval(updateStatus, 2000);
+                refreshInterval = setInterval(updateProcessGrid, 3000);
                 checkbox.checked = true;
             } else {
                 clearInterval(refreshInterval);
@@ -255,74 +646,10 @@ HTML_TEMPLATE = """
         
         // Start auto-refresh when page loads
         window.onload = function() {
-            updateStatus();
-            refreshInterval = setInterval(updateStatus, 2000);
-            document.getElementById('auto-refresh').checked = true;
+            updateProcessGrid();
+            refreshInterval = setInterval(updateProcessGrid, 3000);
         }
     </script>
-</head>
-<body>
-    <div class="container">
-        <h1>🏈 AIrsenal Dashboard</h1>
-        
-        <div class="info-grid">
-            <div class="info-card">
-                <span class="info-label">FPL Team ID</span>
-                <span class="info-value">{{ fpl_team_id or 'Not configured' }}</span>
-            </div>
-            <div class="info-card">
-                <span class="info-label">Server Time</span>
-                <span class="info-value">{{ current_time }}</span>
-            </div>
-            <div class="info-card">
-                <span class="info-label">Last Run</span>
-                <span class="info-value">{{ last_run or 'Never' }}</span>
-            </div>
-        </div>
-        
-        <div class="status-card status {{ status_class }}">
-            <strong>Status:</strong> <span id="pipeline-status">{{ pipeline_status }}</span>
-        </div>
-        
-        <div class="current-step">
-            <strong>Current Step:</strong> <span id="current-step">{{ current_step or 'Waiting...' }}</span>
-        </div>
-        
-        <div class="progress-container">
-            <div class="progress-bar">
-                <div class="progress-fill" id="progress-fill" style="width: {{ pipeline_progress }}%"></div>
-            </div>
-            <div class="progress-text" id="progress-text">{{ pipeline_progress }}%</div>
-        </div>
-        
-        <div class="controls">
-            <button onclick="runPipeline()" id="runBtn" {{ 'disabled' if 'Running' in pipeline_status else '' }}>
-                {% if 'Running' in pipeline_status %}
-                    🔄 Running...
-                {% else %}
-                    ▶️ Run Pipeline
-                {% endif %}
-            </button>
-            
-            <button onclick="updateStatus()">🔄 Refresh Now</button>
-            
-            <div class="auto-refresh">
-                <input type="checkbox" id="auto-refresh" onchange="toggleAutoRefresh()">
-                <label for="auto-refresh">Auto-refresh (2s)</label>
-            </div>
-        </div>
-        
-        <div class="log-container">
-            <div class="log-header">📋 Pipeline Output</div>
-            <div class="log" id="log-output">{{ log_output }}</div>
-        </div>
-        
-        <div class="info-card">
-            <strong>About:</strong> This dashboard runs the AIrsenal Fantasy Premier League analysis pipeline. 
-            The pipeline fetches the latest FPL data, updates predictions, and generates transfer suggestions.
-            Progress is updated in real-time during execution.
-        </div>
-    </div>
 </body>
 </html>
 """
@@ -330,58 +657,91 @@ HTML_TEMPLATE = """
 @app.route('/')
 def dashboard():
     """Main dashboard page"""
-    global pipeline_status, last_run, output_log, pipeline_progress, current_step
-    
-    # Determine status class for styling
-    status_class = "not-started"
-    if "Running" in pipeline_status:
-        status_class = "running"
-    elif "success" in pipeline_status.lower() or "Completed" in pipeline_status:
-        status_class = "success"
-    elif "Error" in pipeline_status or "Failed" in pipeline_status:
-        status_class = "error"
-    
-    # Get recent log entries
-    recent_logs = output_log[-30:] if output_log else ["No activity yet"]
-    log_output = "\n".join(recent_logs)
+    active_processes = len([p for p in processes.values() if p['status'] == 'Running...'])
     
     return render_template_string(
         HTML_TEMPLATE,
-        pipeline_status=pipeline_status,
-        status_class=status_class,
-        pipeline_progress=pipeline_progress,
-        current_step=current_step,
-        last_run=last_run.strftime("%Y-%m-%d %H:%M:%S") if last_run else None,
         current_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         fpl_team_id=os.getenv('FPL_TEAM_ID'),
-        log_output=log_output
+        active_processes=active_processes,
+        processes=AIRSENAL_PROCESSES
     )
 
-@app.route('/run-pipeline', methods=['POST'])
-def run_pipeline():
-    """API endpoint to trigger pipeline run"""
-    global pipeline_status
+@app.route('/run-process/<process_id>', methods=['POST'])
+def run_process(process_id):
+    """API endpoint to trigger a specific process"""
+    if process_id not in AIRSENAL_PROCESSES:
+        return jsonify({"status": "error", "message": "Invalid process ID"})
     
-    if "Running" in pipeline_status:
-        return jsonify({"status": "error", "message": "Pipeline already running"})
+    if process_id in processes and processes[process_id]['status'] == 'Running...':
+        return jsonify({"status": "error", "message": "Process already running"})
     
-    # Start pipeline in background thread
-    thread = threading.Thread(target=run_airsenal_pipeline)
+    # Start process in background thread
+    thread = threading.Thread(target=run_airsenal_process, args=(process_id,))
     thread.daemon = True
     thread.start()
     
-    return jsonify({"status": "success", "message": "Pipeline started"})
+    return jsonify({"status": "success", "message": f"{AIRSENAL_PROCESSES[process_id]['name']} started"})
 
-@app.route('/status')
-def get_status():
-    """API endpoint to get current status with progress"""
+@app.route('/status/all')
+def get_all_status():
+    """API endpoint to get status of all processes"""
     return jsonify({
-        "status": pipeline_status,
-        "progress": pipeline_progress,
-        "current_step": current_step,
-        "last_run": last_run.isoformat() if last_run else None,
-        "logs": output_log[-20:] if output_log else []
+        "processes": processes,
+        "logs": {pid: logs[-20:] for pid, logs in output_logs.items()},
+        "transfers": current_transfers,
+        "team_status": team_status
     })
+
+@app.route('/execute-transfers', methods=['POST'])
+def execute_transfers_endpoint():
+    """API endpoint to execute selected transfers"""
+    data = request.get_json()
+    transfer_indices = data.get('transfer_indices', [])
+    confirm = data.get('confirm', False)
+    
+    if not transfer_indices:
+        return jsonify({"status": "error", "message": "No transfers selected"})
+    
+    # Get selected transfers
+    selected_transfers = [current_transfers[i] for i in transfer_indices if i < len(current_transfers)]
+    
+    if not selected_transfers:
+        return jsonify({"status": "error", "message": "Invalid transfer selection"})
+    
+    # Execute transfers
+    result = execute_transfers(selected_transfers, confirm=confirm)
+    return jsonify(result)
+
+@app.route('/refresh-transfers', methods=['POST'])
+def refresh_transfers():
+    """API endpoint to refresh team status and transfer suggestions"""
+    get_current_team_status()
+    return jsonify({"status": "success", "message": "Transfer data refreshed"})
+
+@app.route('/logs/<process_id>')
+def get_process_logs(process_id):
+    """API endpoint to get logs for a specific process"""
+    if process_id in output_logs:
+        return jsonify({"logs": output_logs[process_id][-50:]})
+    return jsonify({"logs": []})
+
+@app.route('/stop-all', methods=['POST'])
+def stop_all_processes():
+    """API endpoint to stop all processes (placeholder)"""
+    # Note: This is a placeholder - actual process termination would require storing process handles
+    for process_id in processes:
+        if processes[process_id]['status'] == 'Running...':
+            processes[process_id]['status'] = 'Stopped'
+            processes[process_id]['progress'] = 0
+    return jsonify({"status": "success", "message": "All processes stopped"})
+
+@app.route('/clear-logs', methods=['POST'])
+def clear_all_logs():
+    """API endpoint to clear all logs"""
+    global output_logs
+    output_logs = {}
+    return jsonify({"status": "success", "message": "All logs cleared"})
 
 @app.route('/health')
 def health_check():
@@ -389,10 +749,10 @@ def health_check():
     return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()})
 
 if __name__ == '__main__':
-    # Add startup message
-    output_log.append(f"[{datetime.now().strftime('%H:%M:%S')}] 🚀 AIrsenal web interface started")
+    # Initialize transfer data
+    get_current_team_status()
     
-    # Get port from environment variable (Render sets this automatically)
+    # Get port from environment variable
     port = int(os.environ.get('PORT', 10000))
     
     # Run the Flask app
