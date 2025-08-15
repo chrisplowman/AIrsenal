@@ -195,8 +195,8 @@ HTML_TEMPLATE = """
             
             isRunning = true;
             document.getElementById('spinner').style.display = 'inline-block';
-            document.getElementById('status').innerHTML = '';
-            document.getElementById('output').innerHTML = '';
+            document.getElementById('status').innerHTML = '<div class="info">Starting ' + action + '...</div>';
+            document.getElementById('output').innerHTML = 'Initializing...\n';
             
             // Disable all buttons
             const buttons = document.querySelectorAll('button');
@@ -216,7 +216,12 @@ HTML_TEMPLATE = """
                     weeks_ahead: weeksAhead
                 })
             })
-            .then(response => response.json())
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error('Network response was not ok');
+                }
+                return response.json();
+            })
             .then(data => {
                 if (data.process_id) {
                     // Start listening for updates
@@ -227,42 +232,56 @@ HTML_TEMPLATE = """
                 }
             })
             .catch(error => {
-                handleComplete(false, error.toString(), '');
+                console.error('Error starting command:', error);
+                handleComplete(false, 'Failed to start command: ' + error.toString(), '');
             });
         }
         
         function listenForUpdates(processId) {
+            console.log('Listening for updates on process:', processId);
+            
             // Use Server-Sent Events for real-time updates
             eventSource = new EventSource('/stream/' + processId);
             
             let outputLines = [];
             
             eventSource.onmessage = function(event) {
-                const data = JSON.parse(event.data);
-                
-                if (data.output) {
-                    outputLines.push(data.output);
-                    // Show last 50 lines
-                    const displayLines = outputLines.slice(-50);
-                    document.getElementById('output').innerHTML = displayLines.join('');
-                    // Auto-scroll to bottom
-                    const outputDiv = document.getElementById('output');
-                    outputDiv.scrollTop = outputDiv.scrollHeight;
-                }
-                
-                if (data.status) {
-                    document.getElementById('status').innerHTML = '<div class="info">Status: ' + data.status + '</div>';
-                }
-                
-                if (data.complete) {
-                    eventSource.close();
-                    handleComplete(data.success, data.error, outputLines.join(''));
+                try {
+                    const data = JSON.parse(event.data);
+                    
+                    if (data.output) {
+                        outputLines.push(data.output);
+                        // Show last 50 lines
+                        const displayLines = outputLines.slice(-50);
+                        document.getElementById('output').innerHTML = escapeHtml(displayLines.join(''));
+                        // Auto-scroll to bottom
+                        const outputDiv = document.getElementById('output');
+                        outputDiv.scrollTop = outputDiv.scrollHeight;
+                    }
+                    
+                    if (data.status) {
+                        document.getElementById('status').innerHTML = '<div class="info">Status: ' + escapeHtml(data.status) + '</div>';
+                    }
+                    
+                    if (data.complete) {
+                        eventSource.close();
+                        eventSource = null;
+                        handleComplete(data.success, data.error, outputLines.join(''));
+                    }
+                } catch (err) {
+                    console.error('Error parsing SSE data:', err, 'Raw data:', event.data);
                 }
             };
             
             eventSource.onerror = function(error) {
-                eventSource.close();
-                handleComplete(false, 'Connection lost', '');
+                console.error('SSE error:', error);
+                if (eventSource) {
+                    eventSource.close();
+                    eventSource = null;
+                }
+                if (isRunning) {
+                    handleComplete(false, 'Connection to server lost. The command may still be running.', outputLines.join(''));
+                }
             };
         }
         
@@ -277,13 +296,26 @@ HTML_TEMPLATE = """
             if (success) {
                 document.getElementById('status').innerHTML = '<div class="success">✓ Command completed successfully!</div>';
             } else {
-                document.getElementById('status').innerHTML = '<div class="error">✗ Error: ' + error + '</div>';
+                document.getElementById('status').innerHTML = '<div class="error">✗ Error: ' + escapeHtml(error || 'Unknown error') + '</div>';
             }
             
-            if (!output) {
+            if (!output || output.trim() === '') {
                 document.getElementById('output').innerHTML = 'No output captured.';
             }
         }
+        
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
+        // Clean up on page unload
+        window.addEventListener('beforeunload', function() {
+            if (eventSource) {
+                eventSource.close();
+            }
+        });
     </script>
 </body>
 </html>
@@ -299,7 +331,8 @@ def run_command_with_streaming(command, process_id, timeout=1800):
             'status': 'running',
             'output_queue': queue.Queue(),
             'success': False,
-            'error': None
+            'error': None,
+            'complete': False
         }
         active_processes[process_id] = process_info
         
@@ -317,39 +350,59 @@ def run_command_with_streaming(command, process_id, timeout=1800):
         # Stream output line by line
         def stream_output():
             try:
-                for line in iter(process.stdout.readline, ''):
-                    if line:
-                        process_info['output_queue'].put(line)
-                        logger.info(f"Output: {line.strip()}")
+                while True:
+                    line = process.stdout.readline()
+                    if not line:
+                        break
+                    
+                    # Put line in queue for streaming
+                    process_info['output_queue'].put(line)
+                    logger.info(f"Output: {line.strip()}")
                 
-                process.stdout.close()
-                return_code = process.wait(timeout=timeout)
+                # Wait for process to complete
+                return_code = process.wait()
                 
                 if return_code == 0:
                     process_info['success'] = True
                     process_info['status'] = 'completed'
+                    logger.info(f"Command completed successfully")
                 else:
                     process_info['success'] = False
                     process_info['error'] = f"Command failed with exit code {return_code}"
                     process_info['status'] = 'failed'
+                    logger.error(f"Command failed with exit code {return_code}")
                     
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process_info['success'] = False
-                process_info['error'] = f"Command timed out after {timeout/60} minutes"
-                process_info['status'] = 'timeout'
             except Exception as e:
+                logger.error(f"Error in stream_output: {e}")
                 process_info['success'] = False
                 process_info['error'] = str(e)
                 process_info['status'] = 'error'
             finally:
                 # Mark as complete
                 process_info['complete'] = True
+                logger.info(f"Process {process_id} marked as complete")
         
         # Start streaming in a separate thread
         thread = threading.Thread(target=stream_output)
         thread.daemon = True
         thread.start()
+        
+        # Set a timeout to kill the process if it runs too long
+        def timeout_handler():
+            time.sleep(timeout)
+            if not process_info['complete']:
+                try:
+                    process.kill()
+                    process_info['error'] = f"Command timed out after {timeout/60} minutes"
+                    process_info['status'] = 'timeout'
+                    process_info['complete'] = True
+                    logger.warning(f"Process {process_id} timed out")
+                except:
+                    pass
+        
+        timeout_thread = threading.Thread(target=timeout_handler)
+        timeout_thread.daemon = True
+        timeout_thread.start()
         
         return True
         
@@ -358,7 +411,9 @@ def run_command_with_streaming(command, process_id, timeout=1800):
         active_processes[process_id] = {
             'status': 'error',
             'error': str(e),
-            'complete': True
+            'complete': True,
+            'success': False,
+            'output_queue': queue.Queue()
         }
         return False
 
@@ -412,42 +467,58 @@ def handle_command():
 def stream_output(process_id):
     """Stream command output using Server-Sent Events"""
     def generate():
-        if process_id not in active_processes:
-            yield f"data: {json.dumps({'error': 'Process not found', 'complete': True})}\n\n"
-            return
-        
-        process_info = active_processes[process_id]
-        
-        # Send initial status
-        yield f"data: {json.dumps({'status': 'Command started...'})}\n\n"
-        
-        # Stream output lines
-        while True:
-            # Check for new output
-            try:
-                while not process_info['output_queue'].empty():
-                    line = process_info['output_queue'].get_nowait()
-                    yield f"data: {json.dumps({'output': line})}\n\n"
-            except:
-                pass
+        try:
+            if process_id not in active_processes:
+                yield f"data: {json.dumps({'error': 'Process not found', 'complete': True})}\n\n"
+                return
             
-            # Check if process is complete
-            if process_info.get('complete', False):
-                result = {
-                    'complete': True,
-                    'success': process_info.get('success', False),
-                    'error': process_info.get('error', None)
-                }
-                yield f"data: {json.dumps(result)}\n\n"
+            process_info = active_processes[process_id]
+            
+            # Send initial status
+            yield f"data: {json.dumps({'status': 'Command started...'})}\n\n"
+            
+            # Stream output lines
+            while True:
+                # Check for new output
+                try:
+                    while not process_info['output_queue'].empty():
+                        line = process_info['output_queue'].get_nowait()
+                        # Ensure line is properly escaped for JSON
+                        safe_line = line.replace('\\', '\\\\').replace('"', '\\"').replace('\r', '\\r').replace('\n', '\\n')
+                        yield f"data: {json.dumps({'output': line}, ensure_ascii=False)}\n\n"
+                except queue.Empty:
+                    pass
+                except Exception as e:
+                    logger.error(f"Error getting output from queue: {e}")
                 
-                # Clean up
-                del active_processes[process_id]
-                break
-            
-            # Small delay to prevent busy waiting
-            time.sleep(0.1)
+                # Check if process is complete
+                if process_info.get('complete', False):
+                    result = {
+                        'complete': True,
+                        'success': process_info.get('success', False),
+                        'error': process_info.get('error', None)
+                    }
+                    yield f"data: {json.dumps(result, ensure_ascii=False)}\n\n"
+                    
+                    # Clean up
+                    try:
+                        del active_processes[process_id]
+                    except:
+                        pass
+                    break
+                
+                # Small delay to prevent busy waiting
+                time.sleep(0.1)
+        except GeneratorExit:
+            logger.info(f"Client disconnected from stream {process_id}")
+        except Exception as e:
+            logger.error(f"Error in stream generation: {e}")
+            yield f"data: {json.dumps({'error': str(e), 'complete': True})}\n\n"
     
-    return Response(generate(), mimetype='text/event-stream')
+    response = Response(generate(), mimetype='text/event-stream')
+    response.headers['Cache-Control'] = 'no-cache'
+    response.headers['X-Accel-Buffering'] = 'no'  # Disable nginx buffering
+    return response
 
 @app.route('/health')
 def health():
