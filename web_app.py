@@ -1,19 +1,15 @@
 #!/usr/bin/env python
 """
-Web application for AIrsenal using Streamlit
-This file creates a web interface for the AIrsenal Fantasy Premier League optimization tool.
+Simple web application for AIrsenal using Flask
+This file creates a basic web interface for the AIrsenal Fantasy Premier League optimization tool.
 """
 
-import streamlit as st
+from flask import Flask, render_template_string, request, jsonify
 import subprocess
 import json
 import os
 import sys
-import time
-import pandas as pd
-from pathlib import Path
 import threading
-import queue
 import logging
 
 # Configure logging
@@ -27,23 +23,199 @@ sys.path.insert(0, '/airsenal')
 if 'AIRSENAL_HOME' not in os.environ:
     os.environ['AIRSENAL_HOME'] = '/tmp'
 
-# Page configuration
-st.set_page_config(
-    page_title="AIrsenal - Fantasy Premier League Optimizer",
-    page_icon="⚽",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+app = Flask(__name__)
 
-# Initialize session state
-if 'process_running' not in st.session_state:
-    st.session_state.process_running = False
-if 'results' not in st.session_state:
-    st.session_state.results = None
-if 'error' not in st.session_state:
-    st.session_state.error = None
-if 'log_messages' not in st.session_state:
-    st.session_state.log_messages = []
+# HTML template for the web interface
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>AIrsenal - Fantasy Premier League Optimizer</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        .container {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input, select {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-right: 10px;
+            margin-top: 10px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        .output {
+            background-color: #f0f0f0;
+            padding: 10px;
+            border-radius: 4px;
+            margin-top: 20px;
+            white-space: pre-wrap;
+            font-family: monospace;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .error {
+            color: red;
+            margin-top: 10px;
+        }
+        .success {
+            color: green;
+            margin-top: 10px;
+        }
+        .spinner {
+            display: none;
+            margin-left: 10px;
+        }
+        .spinning {
+            display: inline-block;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <h1>⚽ AIrsenal - Fantasy Premier League Optimizer</h1>
+    
+    <div class="container">
+        <h2>Configuration</h2>
+        <div class="form-group">
+            <label for="fpl_team_id">FPL Team ID:</label>
+            <input type="text" id="fpl_team_id" placeholder="Enter your FPL Team ID" value="{{ fpl_team_id }}">
+        </div>
+        
+        <div class="form-group">
+            <label for="weeks_ahead">Weeks to Look Ahead:</label>
+            <select id="weeks_ahead">
+                <option value="1">1 Week</option>
+                <option value="2">2 Weeks</option>
+                <option value="3" selected>3 Weeks</option>
+                <option value="4">4 Weeks</option>
+                <option value="5">5 Weeks</option>
+            </select>
+        </div>
+    </div>
+    
+    <div class="container">
+        <h2>Actions</h2>
+        <button onclick="runCommand('setup')">🔧 Setup Initial Database</button>
+        <button onclick="runCommand('update')">🔄 Update Database</button>
+        <button onclick="runCommand('predict')">📊 Run Predictions</button>
+        <button onclick="runCommand('optimize')">🎯 Run Optimization</button>
+        <button onclick="runCommand('pipeline')">🚀 Run Full Pipeline</button>
+        <span class="spinner" id="spinner">⏳ Processing...</span>
+    </div>
+    
+    <div class="container">
+        <h2>Output</h2>
+        <div id="status"></div>
+        <div id="output" class="output"></div>
+    </div>
+    
+    <script>
+        let isRunning = false;
+        
+        function runCommand(action) {
+            if (isRunning) {
+                alert('A process is already running. Please wait.');
+                return;
+            }
+            
+            const fplTeamId = document.getElementById('fpl_team_id').value;
+            if (!fplTeamId && action !== 'setup') {
+                alert('Please enter your FPL Team ID first!');
+                return;
+            }
+            
+            isRunning = true;
+            document.getElementById('spinner').style.display = 'inline-block';
+            document.getElementById('status').innerHTML = '';
+            document.getElementById('output').innerHTML = 'Processing...';
+            
+            // Disable all buttons
+            const buttons = document.querySelectorAll('button');
+            buttons.forEach(btn => btn.disabled = true);
+            
+            const weeksAhead = document.getElementById('weeks_ahead').value;
+            
+            fetch('/run_command', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    action: action,
+                    fpl_team_id: fplTeamId,
+                    weeks_ahead: weeksAhead
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                isRunning = false;
+                document.getElementById('spinner').style.display = 'none';
+                
+                // Enable all buttons
+                buttons.forEach(btn => btn.disabled = false);
+                
+                if (data.success) {
+                    document.getElementById('status').innerHTML = '<div class="success">✓ ' + data.message + '</div>';
+                    document.getElementById('output').innerHTML = data.output || 'Command completed successfully.';
+                } else {
+                    document.getElementById('status').innerHTML = '<div class="error">✗ Error: ' + data.error + '</div>';
+                    document.getElementById('output').innerHTML = data.output || '';
+                }
+            })
+            .catch(error => {
+                isRunning = false;
+                document.getElementById('spinner').style.display = 'none';
+                buttons.forEach(btn => btn.disabled = false);
+                document.getElementById('status').innerHTML = '<div class="error">✗ Error: ' + error + '</div>';
+            });
+        }
+    </script>
+</body>
+</html>
+"""
 
 def run_command(command, description="Running command"):
     """Execute a shell command and return the output"""
@@ -54,325 +226,91 @@ def run_command(command, description="Running command"):
             shell=True,
             capture_output=True,
             text=True,
-            cwd='/airsenal'
+            cwd='/airsenal',
+            timeout=300  # 5 minute timeout
         )
         
         if result.returncode != 0:
-            error_msg = f"Command failed: {result.stderr}"
+            error_msg = f"Command failed with exit code {result.returncode}"
+            if result.stderr:
+                error_msg += f": {result.stderr}"
             logger.error(error_msg)
-            return {"success": False, "error": error_msg}
+            return {"success": False, "error": error_msg, "output": result.stdout}
         
         return {"success": True, "output": result.stdout}
+    except subprocess.TimeoutExpired:
+        error_msg = "Command timed out after 5 minutes"
+        logger.error(error_msg)
+        return {"success": False, "error": error_msg}
     except Exception as e:
         error_msg = f"Exception running command: {str(e)}"
         logger.error(error_msg)
         return {"success": False, "error": error_msg}
 
-def setup_database():
-    """Initialize the AIrsenal database"""
-    with st.spinner("Setting up database... This may take a few minutes"):
-        result = run_command("airsenal_setup_initial_db", "Setting up database")
-        if result["success"]:
-            st.success("Database initialized successfully!")
-        else:
-            st.error(f"Database setup failed: {result['error']}")
-        return result
+@app.route('/')
+def index():
+    """Render the main page"""
+    fpl_team_id = os.environ.get('FPL_TEAM_ID', '')
+    return render_template_string(HTML_TEMPLATE, fpl_team_id=fpl_team_id)
 
-def update_database():
-    """Update the AIrsenal database with latest data"""
-    with st.spinner("Updating database with latest data..."):
-        result = run_command("airsenal_update_db", "Updating database")
-        if result["success"]:
-            st.success("Database updated successfully!")
-        else:
-            st.error(f"Database update failed: {result['error']}")
-        return result
-
-def run_prediction(weeks_ahead):
-    """Run the prediction model"""
-    with st.spinner(f"Running predictions for {weeks_ahead} weeks ahead..."):
-        command = f"airsenal_run_prediction --weeks_ahead {weeks_ahead}"
-        result = run_command(command, "Running predictions")
-        if result["success"]:
-            st.success("Predictions completed successfully!")
-        else:
-            st.error(f"Prediction failed: {result['error']}")
-        return result
-
-def run_optimization(weeks_ahead, chips=None):
-    """Run the optimization to find best transfers"""
-    chip_args = ""
-    if chips:
-        for chip, week in chips.items():
-            if week > 0:
-                chip_args += f" --{chip}_week {week}"
+@app.route('/run_command', methods=['POST'])
+def handle_command():
+    """Handle command execution requests"""
+    data = request.json
+    action = data.get('action')
+    fpl_team_id = data.get('fpl_team_id')
+    weeks_ahead = data.get('weeks_ahead', 3)
     
-    with st.spinner(f"Running optimization for {weeks_ahead} weeks ahead..."):
-        command = f"airsenal_run_optimization --weeks_ahead {weeks_ahead}{chip_args}"
-        result = run_command(command, "Running optimization")
-        if result["success"]:
-            st.success("Optimization completed successfully!")
-            # Parse and display results
-            parse_optimization_results(result["output"])
-        else:
-            st.error(f"Optimization failed: {result['error']}")
-        return result
-
-def parse_optimization_results(output):
-    """Parse and display optimization results"""
-    if output:
-        st.text_area("Optimization Results", output, height=400)
-
-def run_pipeline_process(fpl_team_id, weeks_ahead, progress_queue):
-    """Run the full AIrsenal pipeline in a separate thread"""
-    processes = [
-        {"name": "Database Update", "command": "airsenal_update_db"},
-        {"name": "Predictions", "command": f"airsenal_run_prediction --weeks_ahead {weeks_ahead}"},
-        {"name": "Optimization", "command": f"airsenal_run_optimization --weeks_ahead {weeks_ahead}"}
-    ]
+    # Set FPL_TEAM_ID environment variable if provided
+    if fpl_team_id:
+        os.environ['FPL_TEAM_ID'] = fpl_team_id
     
-    total_steps = len(processes)
+    # Define commands for each action
+    commands = {
+        'setup': 'airsenal_setup_initial_db',
+        'update': 'airsenal_update_db',
+        'predict': f'airsenal_run_prediction --weeks_ahead {weeks_ahead}',
+        'optimize': f'airsenal_run_optimization --weeks_ahead {weeks_ahead}',
+        'pipeline': f'airsenal_run_pipeline --weeks_ahead {weeks_ahead}'
+    }
     
-    for i, process_info in enumerate(processes):
-        # Fix: Changed from escaped quotes to single quotes
-        progress_queue.put({
-            "current_step": f"Starting {process_info['name']}...",
-            "progress": i / total_steps
-        })
-        
-        result = subprocess.run(
-            process_info['command'],
-            shell=True,
-            capture_output=True,
-            text=True,
-            cwd='/airsenal'
-        )
-        
-        if result.returncode != 0:
-            progress_queue.put({
-                "error": f"{process_info['name']} failed: {result.stderr}",
-                "progress": -1
-            })
-            return
-        
-        progress_queue.put({
-            "current_step": f"Completed {process_info['name']}",
-            "progress": (i + 1) / total_steps,
-            "output": result.stdout
+    if action not in commands:
+        return jsonify({
+            'success': False,
+            'error': 'Invalid action',
+            'message': 'Invalid action specified'
         })
     
-    progress_queue.put({
-        "current_step": "Pipeline completed successfully!",
-        "progress": 1.0,
-        "complete": True
-    })
+    # Run the command
+    result = run_command(commands[action], f"Running {action}")
+    
+    # Prepare response
+    response = {
+        'success': result['success'],
+        'output': result.get('output', ''),
+        'message': f"{action.capitalize()} completed successfully!" if result['success'] else f"{action.capitalize()} failed"
+    }
+    
+    if not result['success']:
+        response['error'] = result.get('error', 'Unknown error')
+    
+    return jsonify(response)
 
-def main():
-    # Title and description
-    st.title("⚽ AIrsenal - Fantasy Premier League Optimizer")
-    st.markdown("""
-    Welcome to AIrsenal! This tool uses machine learning to optimize your Fantasy Premier League team.
-    Configure your settings in the sidebar and run the optimization pipeline.
-    """)
-    
-    # Sidebar configuration
-    with st.sidebar:
-        st.header("Configuration")
-        
-        # FPL Team ID
-        fpl_team_id = st.text_input(
-            "FPL Team ID",
-            value=os.environ.get("FPL_TEAM_ID", ""),
-            help="Your Fantasy Premier League team ID"
-        )
-        
-        if fpl_team_id:
-            os.environ["FPL_TEAM_ID"] = fpl_team_id
-        
-        # Optional credentials
-        with st.expander("Optional Credentials"):
-            fpl_login = st.text_input(
-                "FPL Login (Email)",
-                value=os.environ.get("FPL_LOGIN", ""),
-                type="password",
-                help="Only needed for automated transfers"
-            )
-            fpl_password = st.text_input(
-                "FPL Password",
-                value=os.environ.get("FPL_PASSWORD", ""),
-                type="password",
-                help="Only needed for automated transfers"
-            )
-            
-            if fpl_login:
-                os.environ["FPL_LOGIN"] = fpl_login
-            if fpl_password:
-                os.environ["FPL_PASSWORD"] = fpl_password
-        
-        # Optimization settings
-        st.header("Optimization Settings")
-        weeks_ahead = st.slider(
-            "Weeks to look ahead",
-            min_value=1,
-            max_value=5,
-            value=3,
-            help="Number of gameweeks to optimize for"
-        )
-        
-        # Chip usage
-        with st.expander("Chip Usage (Optional)"):
-            use_wildcard = st.checkbox("Use Wildcard")
-            wildcard_week = st.number_input("Wildcard Week", min_value=0, value=0) if use_wildcard else 0
-            
-            use_free_hit = st.checkbox("Use Free Hit")
-            free_hit_week = st.number_input("Free Hit Week", min_value=0, value=0) if use_free_hit else 0
-            
-            use_triple_captain = st.checkbox("Use Triple Captain")
-            triple_captain_week = st.number_input("Triple Captain Week", min_value=0, value=0) if use_triple_captain else 0
-            
-            use_bench_boost = st.checkbox("Use Bench Boost")
-            bench_boost_week = st.number_input("Bench Boost Week", min_value=0, value=0) if use_bench_boost else 0
-    
-    # Main content area
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.header("Quick Actions")
-        
-        if st.button("🔧 Setup Initial Database", disabled=st.session_state.process_running):
-            if not fpl_team_id:
-                st.error("Please enter your FPL Team ID first!")
-            else:
-                setup_database()
-        
-        if st.button("🔄 Update Database", disabled=st.session_state.process_running):
-            if not fpl_team_id:
-                st.error("Please enter your FPL Team ID first!")
-            else:
-                update_database()
-        
-        if st.button("📊 Run Predictions Only", disabled=st.session_state.process_running):
-            if not fpl_team_id:
-                st.error("Please enter your FPL Team ID first!")
-            else:
-                run_prediction(weeks_ahead)
-        
-        if st.button("🎯 Run Optimization Only", disabled=st.session_state.process_running):
-            if not fpl_team_id:
-                st.error("Please enter your FPL Team ID first!")
-            else:
-                chips = {
-                    "wildcard": wildcard_week,
-                    "free_hit": free_hit_week,
-                    "triple_captain": triple_captain_week,
-                    "bench_boost": bench_boost_week
-                }
-                run_optimization(weeks_ahead, chips)
-    
-    with col2:
-        st.header("Full Pipeline")
-        
-        if st.button(
-            "🚀 Run Full Pipeline",
-            disabled=st.session_state.process_running,
-            help="Updates database, runs predictions, and optimizes transfers"
-        ):
-            if not fpl_team_id:
-                st.error("Please enter your FPL Team ID first!")
-            else:
-                st.session_state.process_running = True
-                st.session_state.error = None
-                
-                # Create a progress container
-                progress_container = st.container()
-                
-                with progress_container:
-                    progress_bar = st.progress(0)
-                    status_text = st.empty()
-                    output_area = st.empty()
-                    
-                    # Create a queue for progress updates
-                    progress_queue = queue.Queue()
-                    
-                    # Start the pipeline in a separate thread
-                    pipeline_thread = threading.Thread(
-                        target=run_pipeline_process,
-                        args=(fpl_team_id, weeks_ahead, progress_queue)
-                    )
-                    pipeline_thread.start()
-                    
-                    # Monitor progress
-                    outputs = []
-                    while pipeline_thread.is_alive() or not progress_queue.empty():
-                        try:
-                            update = progress_queue.get(timeout=0.1)
-                            
-                            if "error" in update:
-                                st.session_state.error = update["error"]
-                                st.error(update["error"])
-                                st.session_state.process_running = False
-                                break
-                            
-                            if "current_step" in update:
-                                status_text.text(update["current_step"])
-                            
-                            if "progress" in update and update["progress"] >= 0:
-                                progress_bar.progress(update["progress"])
-                            
-                            if "output" in update:
-                                outputs.append(update["output"])
-                                # Display accumulated output
-                                output_area.text_area(
-                                    "Pipeline Output",
-                                    "\n".join(outputs[-5:]),  # Show last 5 outputs
-                                    height=200
-                                )
-                            
-                            if update.get("complete", False):
-                                st.success("Pipeline completed successfully!")
-                                st.balloons()
-                                st.session_state.process_running = False
-                                break
-                                
-                        except queue.Empty:
-                            continue
-                    
-                    pipeline_thread.join()
-                    st.session_state.process_running = False
-    
-    # Results section
-    st.header("Results")
-    
-    if st.session_state.results:
-        st.subheader("Optimization Results")
-        st.json(st.session_state.results)
-    
-    if st.session_state.error:
-        st.error(f"Error: {st.session_state.error}")
-    
-    # Information section
-    with st.expander("ℹ️ About AIrsenal"):
-        st.markdown("""
-        AIrsenal is a machine learning-powered tool for optimizing Fantasy Premier League teams.
-        
-        **Features:**
-        - Statistical modeling of player and team performance
-        - Optimization of transfers and team selection
-        - Support for chip usage (Wildcard, Free Hit, etc.)
-        - Automated team management
-        
-        **How it works:**
-        1. **Database Setup**: Downloads historical data from the FPL API
-        2. **Predictions**: Uses statistical models to predict player points
-        3. **Optimization**: Finds the best transfer strategy given constraints
-        
-        **Tips:**
-        - Run the full pipeline weekly before the gameweek deadline
-        - Consider the optimization suggestions but use your judgment
-        - The tool works best when looking 3 weeks ahead
-        
-        For more information, visit the [AIrsenal GitHub repository](https://github.com/alan-turing-institute/AIrsenal)
-        """)
+@app.route('/health')
+def health():
+    """Health check endpoint"""
+    return jsonify({'status': 'healthy'})
 
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    # Get port from environment variable (Render sets this)
+    port = int(os.environ.get('PORT', 5000))
+    
+    # Check if we're in production (Render) or development
+    is_production = os.environ.get('RENDER', False)
+    
+    if is_production:
+        # Production settings for Render
+        app.run(host='0.0.0.0', port=port, debug=False)
+    else:
+        # Development settings
+        app.run(host='127.0.0.1', port=port, debug=True)
