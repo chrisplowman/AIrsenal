@@ -4,13 +4,15 @@ Simple web application for AIrsenal using Flask
 This file creates a basic web interface for the AIrsenal Fantasy Premier League optimization tool.
 """
 
-from flask import Flask, render_template_string, request, jsonify
+from flask import Flask, render_template_string, request, jsonify, Response
 import subprocess
 import json
 import os
 import sys
 import threading
 import logging
+import queue
+import time
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -24,6 +26,9 @@ if 'AIRSENAL_HOME' not in os.environ:
     os.environ['AIRSENAL_HOME'] = '/tmp'
 
 app = Flask(__name__)
+
+# Store active processes
+active_processes = {}
 
 # HTML template for the web interface
 HTML_TEMPLATE = """
@@ -112,10 +117,30 @@ HTML_TEMPLATE = """
             0% { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
         }
+        .warning {
+            background-color: #fff3cd;
+            border: 1px solid #ffc107;
+            color: #856404;
+            padding: 10px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+        }
+        .info {
+            color: #0066cc;
+            margin-top: 10px;
+        }
+        }
     </style>
 </head>
 <body>
     <h1>⚽ AIrsenal - Fantasy Premier League Optimizer</h1>
+    
+    <div class="container">
+        <div class="warning">
+            ⚠️ <strong>Note:</strong> The initial database setup can take 10-30 minutes as it downloads 3 seasons of data. 
+            Please be patient. Other operations are typically faster.
+        </div>
+    </div>
     
     <div class="container">
         <h2>Configuration</h2>
@@ -154,6 +179,7 @@ HTML_TEMPLATE = """
     
     <script>
         let isRunning = false;
+        let eventSource = null;
         
         function runCommand(action) {
             if (isRunning) {
@@ -170,7 +196,7 @@ HTML_TEMPLATE = """
             isRunning = true;
             document.getElementById('spinner').style.display = 'inline-block';
             document.getElementById('status').innerHTML = '';
-            document.getElementById('output').innerHTML = 'Processing...';
+            document.getElementById('output').innerHTML = '';
             
             // Disable all buttons
             const buttons = document.querySelectorAll('button');
@@ -178,6 +204,7 @@ HTML_TEMPLATE = """
             
             const weeksAhead = document.getElementById('weeks_ahead').value;
             
+            // Start the command
             fetch('/run_command', {
                 method: 'POST',
                 headers: {
@@ -191,61 +218,149 @@ HTML_TEMPLATE = """
             })
             .then(response => response.json())
             .then(data => {
-                isRunning = false;
-                document.getElementById('spinner').style.display = 'none';
-                
-                // Enable all buttons
-                buttons.forEach(btn => btn.disabled = false);
-                
-                if (data.success) {
-                    document.getElementById('status').innerHTML = '<div class="success">✓ ' + data.message + '</div>';
-                    document.getElementById('output').innerHTML = data.output || 'Command completed successfully.';
+                if (data.process_id) {
+                    // Start listening for updates
+                    listenForUpdates(data.process_id);
                 } else {
-                    document.getElementById('status').innerHTML = '<div class="error">✗ Error: ' + data.error + '</div>';
-                    document.getElementById('output').innerHTML = data.output || '';
+                    // Handle immediate error
+                    handleComplete(false, data.error || 'Unknown error', '');
                 }
             })
             .catch(error => {
-                isRunning = false;
-                document.getElementById('spinner').style.display = 'none';
-                buttons.forEach(btn => btn.disabled = false);
-                document.getElementById('status').innerHTML = '<div class="error">✗ Error: ' + error + '</div>';
+                handleComplete(false, error.toString(), '');
             });
+        }
+        
+        function listenForUpdates(processId) {
+            // Use Server-Sent Events for real-time updates
+            eventSource = new EventSource('/stream/' + processId);
+            
+            let outputLines = [];
+            
+            eventSource.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                
+                if (data.output) {
+                    outputLines.push(data.output);
+                    // Show last 50 lines
+                    const displayLines = outputLines.slice(-50);
+                    document.getElementById('output').innerHTML = displayLines.join('');
+                    // Auto-scroll to bottom
+                    const outputDiv = document.getElementById('output');
+                    outputDiv.scrollTop = outputDiv.scrollHeight;
+                }
+                
+                if (data.status) {
+                    document.getElementById('status').innerHTML = '<div class="info">Status: ' + data.status + '</div>';
+                }
+                
+                if (data.complete) {
+                    eventSource.close();
+                    handleComplete(data.success, data.error, outputLines.join(''));
+                }
+            };
+            
+            eventSource.onerror = function(error) {
+                eventSource.close();
+                handleComplete(false, 'Connection lost', '');
+            };
+        }
+        
+        function handleComplete(success, error, output) {
+            isRunning = false;
+            document.getElementById('spinner').style.display = 'none';
+            
+            // Enable all buttons
+            const buttons = document.querySelectorAll('button');
+            buttons.forEach(btn => btn.disabled = false);
+            
+            if (success) {
+                document.getElementById('status').innerHTML = '<div class="success">✓ Command completed successfully!</div>';
+            } else {
+                document.getElementById('status').innerHTML = '<div class="error">✗ Error: ' + error + '</div>';
+            }
+            
+            if (!output) {
+                document.getElementById('output').innerHTML = 'No output captured.';
+            }
         }
     </script>
 </body>
 </html>
 """
 
-def run_command(command, description="Running command"):
-    """Execute a shell command and return the output"""
+def run_command_with_streaming(command, process_id, timeout=1800):
+    """Execute a shell command and stream output in real-time"""
     try:
         logger.info(f"Executing: {command}")
-        result = subprocess.run(
+        
+        # Store process info
+        process_info = {
+            'status': 'running',
+            'output_queue': queue.Queue(),
+            'success': False,
+            'error': None
+        }
+        active_processes[process_id] = process_info
+        
+        # Start the process
+        process = subprocess.Popen(
             command,
             shell=True,
-            capture_output=True,
-            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             cwd='/airsenal',
-            timeout=300  # 5 minute timeout
+            universal_newlines=True,
+            bufsize=1
         )
         
-        if result.returncode != 0:
-            error_msg = f"Command failed with exit code {result.returncode}"
-            if result.stderr:
-                error_msg += f": {result.stderr}"
-            logger.error(error_msg)
-            return {"success": False, "error": error_msg, "output": result.stdout}
+        # Stream output line by line
+        def stream_output():
+            try:
+                for line in iter(process.stdout.readline, ''):
+                    if line:
+                        process_info['output_queue'].put(line)
+                        logger.info(f"Output: {line.strip()}")
+                
+                process.stdout.close()
+                return_code = process.wait(timeout=timeout)
+                
+                if return_code == 0:
+                    process_info['success'] = True
+                    process_info['status'] = 'completed'
+                else:
+                    process_info['success'] = False
+                    process_info['error'] = f"Command failed with exit code {return_code}"
+                    process_info['status'] = 'failed'
+                    
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process_info['success'] = False
+                process_info['error'] = f"Command timed out after {timeout/60} minutes"
+                process_info['status'] = 'timeout'
+            except Exception as e:
+                process_info['success'] = False
+                process_info['error'] = str(e)
+                process_info['status'] = 'error'
+            finally:
+                # Mark as complete
+                process_info['complete'] = True
         
-        return {"success": True, "output": result.stdout}
-    except subprocess.TimeoutExpired:
-        error_msg = "Command timed out after 5 minutes"
-        logger.error(error_msg)
-        return {"success": False, "error": error_msg}
+        # Start streaming in a separate thread
+        thread = threading.Thread(target=stream_output)
+        thread.daemon = True
+        thread.start()
+        
+        return True
+        
     except Exception as e:
-        error_msg = f"Exception running command: {str(e)}"
-        logger.error(error_msg)
-        return {"success": False, "error": error_msg}
+        logger.error(f"Failed to start command: {str(e)}")
+        active_processes[process_id] = {
+            'status': 'error',
+            'error': str(e),
+            'complete': True
+        }
+        return False
 
 @app.route('/')
 def index():
@@ -265,13 +380,13 @@ def handle_command():
     if fpl_team_id:
         os.environ['FPL_TEAM_ID'] = fpl_team_id
     
-    # Define commands for each action
+    # Define commands for each action with appropriate timeouts
     commands = {
-        'setup': 'airsenal_setup_initial_db',
-        'update': 'airsenal_update_db',
-        'predict': f'airsenal_run_prediction --weeks_ahead {weeks_ahead}',
-        'optimize': f'airsenal_run_optimization --weeks_ahead {weeks_ahead}',
-        'pipeline': f'airsenal_run_pipeline --weeks_ahead {weeks_ahead}'
+        'setup': ('airsenal_setup_initial_db', 1800),  # 30 minutes for initial setup
+        'update': ('airsenal_update_db', 600),  # 10 minutes for update
+        'predict': (f'airsenal_run_prediction --weeks_ahead {weeks_ahead}', 900),  # 15 minutes
+        'optimize': (f'airsenal_run_optimization --weeks_ahead {weeks_ahead}', 1200),  # 20 minutes
+        'pipeline': (f'airsenal_run_pipeline --weeks_ahead {weeks_ahead}', 2400)  # 40 minutes
     }
     
     if action not in commands:
@@ -281,20 +396,58 @@ def handle_command():
             'message': 'Invalid action specified'
         })
     
-    # Run the command
-    result = run_command(commands[action], f"Running {action}")
+    # Get command and timeout
+    command, timeout = commands[action]
     
-    # Prepare response
-    response = {
-        'success': result['success'],
-        'output': result.get('output', ''),
-        'message': f"{action.capitalize()} completed successfully!" if result['success'] else f"{action.capitalize()} failed"
-    }
+    # Generate a unique process ID
+    process_id = f"{action}_{int(time.time())}"
     
-    if not result['success']:
-        response['error'] = result.get('error', 'Unknown error')
+    # Start the command with streaming
+    if run_command_with_streaming(command, process_id, timeout=timeout):
+        return jsonify({'process_id': process_id})
+    else:
+        return jsonify({'success': False, 'error': 'Failed to start command'})
+
+@app.route('/stream/<process_id>')
+def stream_output(process_id):
+    """Stream command output using Server-Sent Events"""
+    def generate():
+        if process_id not in active_processes:
+            yield f"data: {json.dumps({'error': 'Process not found', 'complete': True})}\n\n"
+            return
+        
+        process_info = active_processes[process_id]
+        
+        # Send initial status
+        yield f"data: {json.dumps({'status': 'Command started...'})}\n\n"
+        
+        # Stream output lines
+        while True:
+            # Check for new output
+            try:
+                while not process_info['output_queue'].empty():
+                    line = process_info['output_queue'].get_nowait()
+                    yield f"data: {json.dumps({'output': line})}\n\n"
+            except:
+                pass
+            
+            # Check if process is complete
+            if process_info.get('complete', False):
+                result = {
+                    'complete': True,
+                    'success': process_info.get('success', False),
+                    'error': process_info.get('error', None)
+                }
+                yield f"data: {json.dumps(result)}\n\n"
+                
+                # Clean up
+                del active_processes[process_id]
+                break
+            
+            # Small delay to prevent busy waiting
+            time.sleep(0.1)
     
-    return jsonify(response)
+    return Response(generate(), mimetype='text/event-stream')
 
 @app.route('/health')
 def health():
